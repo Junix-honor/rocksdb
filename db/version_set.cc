@@ -3965,6 +3965,7 @@ struct VersionSet::ManifestWriter {
   InstrumentedCondVar cv;
   ColumnFamilyData* cfd;
   const MutableCFOptions mutable_cf_options;
+  //*VersionEdit的数组
   const autovector<VersionEdit*>& edit_list;
   const std::function<void(const Status&)> manifest_write_callback;
 
@@ -4144,7 +4145,7 @@ void VersionSet::AppendVersion(ColumnFamilyData* column_family_data,
 Status VersionSet::ProcessManifestWrites(
     std::deque<ManifestWriter>& writers, InstrumentedMutex* mu,
     FSDirectory* db_directory, bool new_descriptor_log,
-    const ColumnFamilyOptions* new_cf_options) {
+    const ColumnFamilyOptions* new_cf_options) {  
   mu->AssertHeld();
   assert(!writers.empty());
   ManifestWriter& first_writer = writers.front();
@@ -4158,11 +4159,14 @@ Status VersionSet::ProcessManifestWrites(
   autovector<const MutableCFOptions*> mutable_cf_options_ptrs;
   std::vector<std::unique_ptr<BaseReferencedVersionBuilder>> builder_guards;
 
+  //!保存对应的数据到batch_edits中
   if (first_writer.edit_list.front()->IsColumnFamilyManipulation()) {
+    // ColumnFamilyManipulation
     // No group commits for column family add or drop
     LogAndApplyCFHelper(first_writer.edit_list.front());
     batch_edits.push_back(first_writer.edit_list.front());
   } else {
+    // group commits or drop
     auto it = manifest_writers_.cbegin();
     size_t group_start = std::numeric_limits<size_t>::max();
     while (it != manifest_writers_.cend()) {
@@ -4310,6 +4314,9 @@ Status VersionSet::ProcessManifestWrites(
   }
 #endif  // NDEBUG
 
+  //!创建新的manifest-log文件的逻辑
+  //创建新的manifest-log(MANIFEST-000005)文件的逻辑.这里可以看到要么是第一次进入，
+  //要么文件大小大于option对应的值才会创建新的文件
   assert(pending_manifest_file_number_ == 0);
   if (!descriptor_log_ ||
       manifest_file_size_ > db_options_->max_manifest_file_size) {
@@ -4324,16 +4331,23 @@ Status VersionSet::ProcessManifestWrites(
   // SwitchMemtable().
   std::unordered_map<uint32_t, MutableCFState> curr_state;
   VersionEdit wal_additions;
+
+  //如果需要创建新的manifest-log(MANIFEST-000005)文件，则开始构造对应的文件信息并创建文件.
   if (new_descriptor_log) {
+
+    //file number
     pending_manifest_file_number_ = NewFileNumber();
     batch_edits.back()->SetNextFile(next_file_number_.load());
 
+    // max column family
     // if we are writing out new snapshot make sure to persist max column
     // family.
     if (column_family_set_->GetMaxColumnFamily() > 0) {
       first_writer.edit_list.front()->SetMaxColumnFamily(
           column_family_set_->GetMaxColumnFamily());
     }
+
+    //curr_state
     for (const auto* cfd : *column_family_set_) {
       assert(curr_state.find(cfd->GetID()) == curr_state.end());
       curr_state.emplace(std::make_pair(
@@ -4341,6 +4355,7 @@ Status VersionSet::ProcessManifestWrites(
           MutableCFState(cfd->GetLogNumber(), cfd->GetFullHistoryTsLow())));
     }
 
+    //wal
     for (const auto& wal : wals_.GetWals()) {
       wal_additions.AddWal(wal.first, wal.second);
     }
@@ -4377,9 +4392,11 @@ Status VersionSet::ProcessManifestWrites(
       }
     }
 
+    //创建新的manifest文件
     if (s.ok() && new_descriptor_log) {
       // This is fine because everything inside of this block is serialized --
       // only one thread can be here at the same time
+      
       // create new manifest file
       ROCKS_LOG_INFO(db_options_->info_log, "Creating manifest %" PRIu64 "\n",
                      pending_manifest_file_number_);
@@ -4414,6 +4431,10 @@ Status VersionSet::ProcessManifestWrites(
         }
       }
 
+      //将新记录写入清单日志
+      //开始写入对应的VersionEdit的record到文件(最后我们会来看这个record的构成),这里
+      //看到写入完成后会调用Sync来刷新内容到磁盘,等这些操作都做完之后，则会更新Current
+      //文件也就是更新最新的manifest-log(MANIFEST-000005)文件名到CURRENT文件中.
       // Write new records to MANIFEST log
 #ifndef NDEBUG
       size_t idx = 0;
@@ -4457,6 +4478,7 @@ Status VersionSet::ProcessManifestWrites(
       }
     }
 
+    //更新CURRENT
     // If we just created a new descriptor file, install it by writing a
     // new CURRENT file that points to it.
     if (s.ok()) {
@@ -4486,6 +4508,7 @@ Status VersionSet::ProcessManifestWrites(
     mu->Lock();
   }
 
+  //Apply WAL edits
   if (s.ok()) {
     // Apply WAL edits, DB mutex must be held.
     for (auto& e : batch_edits) {
@@ -4508,6 +4531,7 @@ Status VersionSet::ProcessManifestWrites(
     io_status_ = io_s;
   }
 
+  // CURRENT文件更新完毕之后，就可以删除老的mainfest文件了.
   // Append the old manifest file to the obsolete_manifest_ list to be deleted
   // by PurgeObsoleteFiles later.
   if (s.ok() && new_descriptor_log) {
@@ -4675,6 +4699,8 @@ Status VersionSet::LogAndApply(
     const ColumnFamilyOptions* new_cf_options,
     const std::vector<std::function<void(const Status&)>>& manifest_wcbs) {
   mu->AssertHeld();
+  
+  //num_edits
   int num_edits = 0;
   for (const auto& elist : edit_lists) {
     num_edits += static_cast<int>(elist.size());
@@ -4691,17 +4717,21 @@ Status VersionSet::LogAndApply(
 #endif /* ! NDEBUG */
   }
 
+  //num_cfds
   int num_cfds = static_cast<int>(column_family_datas.size());
   if (num_cfds == 1 && column_family_datas[0] == nullptr) {
     assert(edit_lists.size() == 1 && edit_lists[0].size() == 1);
     assert(edit_lists[0][0]->is_column_family_add_);
     assert(new_cf_options != nullptr);
   }
+
+  //queue our request
   std::deque<ManifestWriter> writers;
   if (num_cfds > 0) {
     assert(static_cast<size_t>(num_cfds) == mutable_cf_options_list.size());
     assert(static_cast<size_t>(num_cfds) == edit_lists.size());
   }
+  //创建一个新的ManifesWriter加入到manifest_writers_队列中
   for (int i = 0; i < num_cfds; ++i) {
     const auto wcb =
         manifest_wcbs.empty() ? [](const Status&) {} : manifest_wcbs[i];
@@ -4710,9 +4740,12 @@ Status VersionSet::LogAndApply(
     manifest_writers_.push_back(&writers[i]);
   }
   assert(!writers.empty());
+
+  //第一个writer
   ManifestWriter& first_writer = writers.front();
   TEST_SYNC_POINT_CALLBACK("VersionSet::LogAndApply:BeforeWriterWaiting",
                            nullptr);
+  //只有当之前保存在队列中的所有Writer都写入完毕之后才会加入到队列，否则就会等待
   while (!first_writer.done && &first_writer != manifest_writers_.front()) {
     first_writer.cv.Wait();
   }
@@ -4729,6 +4762,7 @@ Status VersionSet::LogAndApply(
     return first_writer.status;
   }
 
+  //num_undropped_cfds
   int num_undropped_cfds = 0;
   for (auto cfd : column_family_datas) {
     // if cfd == nullptr, it is a column family add.
@@ -4736,6 +4770,7 @@ Status VersionSet::LogAndApply(
       ++num_undropped_cfds;
     }
   }
+  //dropped cfds
   if (0 == num_undropped_cfds) {
     for (int i = 0; i != num_cfds; ++i) {
       manifest_writers_.pop_front();

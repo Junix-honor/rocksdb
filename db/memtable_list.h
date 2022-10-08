@@ -177,6 +177,7 @@ class MemTableListVersion {
   bool MemtableLimitExceeded(size_t usage);
 
   // Immutable MemTables that have not yet been flushed.
+  // 最新的memtable插入队列头部，查找的时候也是从头开始找，最新的数据在最前面,获取最小的seq号就从list最后一个元素查询
   std::list<MemTable*> memlist_;
 
   // MemTables that have already been flushed
@@ -232,6 +233,7 @@ class MemTableList {
 
   MemTableListVersion* current() const { return current_; }
 
+  //是否需要刷盘
   // so that background threads can detect non-nullptr pointer to
   // determine whether there is anything more to start flushing.
   std::atomic<bool> imm_flush_needed;
@@ -250,6 +252,7 @@ class MemTableList {
   // not yet started.
   bool IsFlushPending() const;
 
+  // 选取memtable进行flush,从后向前遍历memlist
   // Returns the earliest memtables that needs to be flushed. The returned
   // memtables are guaranteed to be in the ascending order of created time.
   void PickMemtablesToFlush(uint64_t max_memtable_id,
@@ -412,11 +415,12 @@ class MemTableList {
                                      size_t batch_count, LogBuffer* log_buffer,
                                      autovector<MemTable*>* to_delete,
                                      InstrumentedMutex* mu);
-
+  // 刷盘最少的memtable合并文件数
   const int min_write_buffer_number_to_merge_;
 
   MemTableListVersion* current_;
 
+  // 需要刷盘的immutable个数
   // the number of elements that still need flushing
   int num_flush_not_started_;
 

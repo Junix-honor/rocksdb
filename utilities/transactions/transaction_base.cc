@@ -324,6 +324,7 @@ Status TransactionBaseImpl::Put(ColumnFamilyHandle* column_family,
                                 const Slice& key, const Slice& value,
                                 const bool assume_tracked) {
   const bool do_validate = !assume_tracked;
+  // 调用TryLock抢锁及冲突检测
   Status s = TryLock(column_family, key, false /* read_only */,
                      true /* exclusive */, do_validate, assume_tracked);
 

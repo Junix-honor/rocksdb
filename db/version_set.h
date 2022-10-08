@@ -1399,7 +1399,9 @@ class VersionSet {
   std::atomic<uint64_t> last_published_sequence_;
   uint64_t prev_log_number_;  // 0 or backing store for memtable being compacted
 
-  // Opened lazily
+
+  //! MANIFEST相关 BEGIN
+  //Opened lazily
   std::unique_ptr<log::Writer> descriptor_log_;
 
   // generates a increasing version number for every new version
@@ -1410,6 +1412,7 @@ class VersionSet {
 
   // Current size of manifest file
   uint64_t manifest_file_size_;
+  //! MANIFEST相关 END
 
   std::vector<ObsoleteFileInfo> obsolete_files_;
   std::vector<ObsoleteBlobFileInfo> obsolete_blob_files_;

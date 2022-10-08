@@ -2695,12 +2695,16 @@ Status DBImpl::CreateColumnFamilies(
   return s;
 }
 
+//首先就是通过调用GetNextColumnFamilyID来得到当前创建的ColumnFamily对应的ID(自增).
+//然后再调用LogAndApply来对ColumnFamily
+//进行对应的操作.最后再返回封装好的ColumnFamilyHandle给调用者.
 Status DBImpl::CreateColumnFamilyImpl(const ColumnFamilyOptions& cf_options,
                                       const std::string& column_family_name,
                                       ColumnFamilyHandle** handle) {
   Status s;
   *handle = nullptr;
 
+  // ValidateOptions
   DBOptions db_options =
       BuildDBOptions(immutable_db_options_, mutable_db_options_);
   s = ColumnFamilyData::ValidateOptions(db_options, cf_options);
@@ -2724,6 +2728,7 @@ Status DBImpl::CreateColumnFamilyImpl(const ColumnFamilyOptions& cf_options,
         nullptr) {
       return Status::InvalidArgument("Column family already exists");
     }
+    //首先就是通过调用GetNextColumnFamilyID来得到当前创建的ColumnFamily对应的ID(自增)
     VersionEdit edit;
     edit.AddColumnFamily(column_family_name);
     uint32_t new_id = versions_->GetColumnFamilySet()->GetNextColumnFamilyID();
@@ -2731,11 +2736,15 @@ Status DBImpl::CreateColumnFamilyImpl(const ColumnFamilyOptions& cf_options,
     edit.SetLogNumber(logfile_number_);
     edit.SetComparatorName(cf_options.comparator->Name());
 
+    //用LogAndApply来对ColumnFamily 进行对应的操作
     // LogAndApply will both write the creation in MANIFEST and create
     // ColumnFamilyData object
     {  // write thread
       WriteThread::Writer w;
       write_thread_.EnterUnbatched(&w, &mutex_);
+
+      //最终会在LogAndApply->ProcessManifestWrites调用ColumnFamilySet的
+      //CreateColumnFamily函数(通过VersionSet::CreateColumnFamily)
       // LogAndApply will both write the creation in MANIFEST and create
       // ColumnFamilyData object
       s = versions_->LogAndApply(nullptr, MutableCFOptions(cf_options), &edit,

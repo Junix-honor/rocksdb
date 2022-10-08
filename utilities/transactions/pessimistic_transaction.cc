@@ -178,14 +178,15 @@ Status PessimisticTransaction::Prepare() {
     return Status::InvalidArgument(
         "Cannot prepare a transaction that has not been named.");
   }
-
+  
+  // 是否已经超时
   if (IsExpired()) {
     return Status::Expired();
   }
 
   Status s;
   bool can_prepare = false;
-
+  //判断事务会不会在prepare时过期
   if (expiration_time_ > 0) {
     // must concern ourselves with expiraton and/or lock stealing
     // need to compare/exchange bc locks could be stolen under us here
@@ -204,6 +205,7 @@ Status PessimisticTransaction::Prepare() {
     assert(log_number_ == 0 ||
            txn_db_impl_->GetTxnDBOptions().write_policy == WRITE_UNPREPARED);
 
+    //! 核心：调用PrepareInternal()
     s = PrepareInternal();
     if (s.ok()) {
       txn_state_.store(PREPARED);
@@ -226,6 +228,8 @@ Status PessimisticTransaction::Prepare() {
 Status WriteCommittedTxn::PrepareInternal() {
   WriteOptions write_options = write_options_;
   write_options.disableWAL = false;
+  // 用MarkEndPrepare 将kTypeBeginPrepareXID 写到原本kTypeNoop
+  // 的位置，然后放入kTypeEndPrepareXID 和本次Txn 的Xid
   auto s = WriteBatchInternal::MarkEndPrepare(GetWriteBatch()->GetWriteBatch(),
                                               name_);
   assert(s.ok());
@@ -253,6 +257,7 @@ Status WriteCommittedTxn::PrepareInternal() {
   } mark_log_callback(db_impl_,
                       db_impl_->immutable_db_options().two_write_queues);
 
+  // 调用WriteImpl将WriteBatch的内容写入到WAL中
   WriteCallback* const kNoWriteCallback = nullptr;
   const uint64_t kRefNoLog = 0;
   const bool kDisableMemtable = true;
@@ -269,6 +274,7 @@ Status PessimisticTransaction::Commit() {
   bool commit_without_prepare = false;
   bool commit_prepared = false;
 
+  // 是否已经超时
   if (IsExpired()) {
     return Status::Expired();
   }
@@ -296,6 +302,7 @@ Status PessimisticTransaction::Commit() {
   }
 
   Status s;
+  // commit_without_prepare的情况
   if (commit_without_prepare) {
     assert(!commit_prepared);
     if (WriteBatchInternal::Count(GetCommitTimeWriteBatch()) > 0) {
@@ -317,8 +324,10 @@ Status PessimisticTransaction::Commit() {
       }
     }
   } else if (commit_prepared) {
+    // commit_prepared的情况
     txn_state_.store(AWAITING_COMMIT);
 
+    //! 核心：调用CommitInternal()
     s = CommitInternal();
 
     if (!s.ok()) {
@@ -379,12 +388,15 @@ Status WriteCommittedTxn::CommitInternal() {
   // We take the commit-time batch and append the Commit marker.
   // The Memtable will ignore the Commit marker in non-recovery mode
   WriteBatch* working_batch = GetCommitTimeWriteBatch();
+  // 将准备写入WAL的位置标记在Commit之前，这样只有Commit 标记跟Xid 写入WAL
+  // push back kTypeCommitXID marker and xid
   auto s = WriteBatchInternal::MarkCommit(working_batch, name_);
   assert(s.ok());
 
   // any operations appended to this working_batch will be ignored from WAL
   working_batch->MarkWalTerminationPoint();
 
+  //将之前保存数据的WriteBatch 追加到新建的WriteBatch上。
   // insert prepared batch into Memtable only skipping WAL.
   // Memtable will ignore BeginPrepare/EndPrepare markers
   // in non recovery mode and simply insert the values
@@ -393,6 +405,7 @@ Status WriteCommittedTxn::CommitInternal() {
   assert(s.ok());
 
   uint64_t seq_used = kMaxSequenceNumber;
+  //用WriteImpl 将Commit 标记跟Xid 写入WAL，将数据写入Memtable
   s = db_impl_->WriteImpl(write_options_, working_batch, /*callback*/ nullptr,
                           /*log_used*/ nullptr, /*log_ref*/ log_number_,
                           /*disable_memtable*/ false, &seq_used);
@@ -565,6 +578,7 @@ Status PessimisticTransaction::TryLock(ColumnFamilyHandle* column_family,
   uint32_t cfh_id = GetColumnFamilyID(column_family);
   std::string key_str = key.ToString();
 
+  //获取锁的状态
   PointLockStatus status;
   bool lock_upgrade;
   bool previously_locked;
@@ -579,6 +593,7 @@ Status PessimisticTransaction::TryLock(ColumnFamilyHandle* column_family,
     lock_upgrade = false;
   }
 
+  // 加锁
   // Lock this key if this transactions hasn't already locked it or we require
   // an upgrade.
   if (!previously_locked || lock_upgrade) {
@@ -595,7 +610,10 @@ Status PessimisticTransaction::TryLock(ColumnFamilyHandle* column_family,
   // future
   SequenceNumber tracked_at_seq =
       status.locked ? status.seq : kMaxSequenceNumber;
+
+  // 事务没有设置快照
   if (!do_validate || snapshot_ == nullptr) {
+    // assume_tracked断言
     if (assume_tracked && !previously_locked &&
         tracked_locks_->IsPointLockSupported()) {
       s = Status::InvalidArgument(
@@ -616,14 +634,19 @@ Status PessimisticTransaction::TryLock(ColumnFamilyHandle* column_family,
       tracked_at_seq = db_->GetLatestSequenceNumber();
     }
   } else {
+    // 事务设置了快照
     // If a snapshot is set, we need to make sure the key hasn't been modified
     // since the snapshot.  This must be done after we locked the key.
     // If we already have validated an earilier snapshot it must has been
     // reflected in tracked_at_seq and ValidateSnapshot will return OK.
     if (s.ok()) {
+      // 使用事务一开始拿到的snapshot的sequence1与这个key在DB中最新
+      // 的sequence2进行比较，如果sequence2 > sequence1则代表在snapshot
+      // 之后，外部有对key进行过写入，有冲突！
       s = ValidateSnapshot(column_family, key, &tracked_at_seq);
 
       if (!s.ok()) {
+        // 检测到冲突，解锁
         // Failed to validate key
         // Unlock key we just locked
         if (lock_upgrade) {
@@ -638,6 +661,7 @@ Status PessimisticTransaction::TryLock(ColumnFamilyHandle* column_family,
   }
 
   if (s.ok()) {
+    // 如果加锁及冲突检测通过，记录这个key以便事务结束时释放掉锁
     // We must track all the locked keys so that we can unlock them later. If
     // the key is already locked, this func will update some stats on the
     // tracked key. It could also update the tracked_at_seq if it is lower

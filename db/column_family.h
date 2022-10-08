@@ -157,6 +157,7 @@ extern const double kIncSlowdownRatio;
 // ColumnFamilyHandleImpl is the class that clients use to access different
 // column families. It has non-trivial destructor, which gets called when client
 // is done using the column family
+// 返回给调用者的ColumnFamilyHandleImpl结构，这个结构主要是封装了ColumnFamilyData
 class ColumnFamilyHandleImpl : public ColumnFamilyHandle {
  public:
   // create while holding the mutex
@@ -260,6 +261,7 @@ extern void GetIntTblPropCollectorFactory(
 
 class ColumnFamilySet;
 
+//每一个Column Family都是一个ColumnFamilyData.
 // This class keeps all the data that a column family needs.
 // Most methods require DB mutex held, unless otherwise noted
 class ColumnFamilyData {
@@ -537,6 +539,7 @@ class ColumnFamilyData {
 
   uint32_t id_;
   const std::string name_;
+  //当前ColumnFamily对应的所有的version(dummy_versions_).
   Version* dummy_versions_;  // Head of circular doubly-linked list of versions.
   Version* current_;         // == dummy_versions->prev_
 
@@ -573,6 +576,7 @@ class ColumnFamilyData {
   // This needs to be destructed before mutex_
   std::unique_ptr<ThreadLocalPtr> local_sv_;
 
+  //用链表来管理 ColumnFamilySet中用来表示所有ColumnFamily的双向链表.
   // pointers for a circular linked list. we use it to support iterations over
   // all column families that are alive (note: dropped column families can also
   // be alive as long as client holds a reference)
@@ -595,6 +599,8 @@ class ColumnFamilyData {
   std::unique_ptr<WriteControllerToken> write_controller_token_;
 
   // If true --> this ColumnFamily is currently present in DBImpl::flush_queue_
+  //这个队列将会保存所有的将要被flush到磁盘的ColumnFamily.只有当当前的ColumnFamily
+  //满足flush条件（cfd->imm()->IsFlushPending()）才会将此CF加入到flush队列．
   bool queued_for_flush_;
 
   // If true --> this ColumnFamily is currently present in
@@ -707,6 +713,7 @@ class ColumnFamilySet {
   // REQUIRES: DB mutex held
   void RemoveColumnFamily(ColumnFamilyData* cfd);
 
+  // map用来保存Column Family名字和对应的id以及ColumnFamilyData的映射
   // column_families_ and column_family_data_ need to be protected:
   // * when mutating both conditions have to be satisfied:
   // 1. DB mutex locked
@@ -720,6 +727,7 @@ class ColumnFamilySet {
   uint32_t max_column_family_;
   const FileOptions file_options_;
 
+  //实际上是双向链表结构，所有的ColumnFamilyData通过这里连接在一起
   ColumnFamilyData* dummy_cfd_;
   // We don't hold the refcount here, since default column family always exists
   // We are also not responsible for cleaning up default_cfd_cache_. This is

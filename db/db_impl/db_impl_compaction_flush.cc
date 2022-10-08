@@ -345,6 +345,7 @@ Status DBImpl::FlushMemTablesToOutputFiles(
     return AtomicFlushMemTablesToOutputFiles(
         bg_flush_args, made_progress, job_context, log_buffer, thread_pri);
   }
+  // sequence number & snapshot
   assert(bg_flush_args.size() == 1);
   std::vector<SequenceNumber> snapshot_seqs;
   SequenceNumber earliest_write_conflict_snapshot;
@@ -2350,8 +2351,14 @@ void DBImpl::EnableManualCompaction() {
   manual_compaction_paused_.fetch_sub(1, std::memory_order_release);
 }
 
+//在RocksDB中所有的compact都是在后台线程中进行的，这个线程就是BGWorkCompaction.
+// 这个线程只有在两种情况下被调用，一个是 手动compact(RunManualCompaction),
+// 一个就是自动(MaybeScheduleFlushOrCompaction),
+//而MaybeScheduleFlushOrCompaction就是会在切换WAL(SwitchWAL)或者writebuffer满的时候(HandleWriteBufferFull)被调用.
 void DBImpl::MaybeScheduleFlushOrCompaction() {
   mutex_.AssertHeld();
+  
+  //特殊情况处理
   if (!opened_successfully_) {
     // Compaction may introduce data race to DB open
     return;
@@ -2369,15 +2376,19 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
     // DB is being deleted; no more background compactions
     return;
   }
+
   auto bg_job_limits = GetBGJobLimits();
   bool is_flush_pool_empty =
       env_->GetBackgroundThreads(Env::Priority::HIGH) == 0;
+
+  // HIGH pri线程池中还有线程资源
   while (!is_flush_pool_empty && unscheduled_flushes_ > 0 &&
          bg_flush_scheduled_ < bg_job_limits.max_flushes) {
     bg_flush_scheduled_++;
     FlushThreadArg* fta = new FlushThreadArg;
     fta->db_ = this;
     fta->thread_pri_ = Env::Priority::HIGH;
+    //这个函数交给子线程执行，然后子线程可以调用BackgroundCallFlush执行真正的Flush操作
     env_->Schedule(&DBImpl::BGWorkFlush, fta, Env::Priority::HIGH, this,
                    &DBImpl::UnscheduleFlushCallback);
     --unscheduled_flushes_;
@@ -2386,6 +2397,7 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
         &unscheduled_flushes_);
   }
 
+  //如果HIGH pri线程池已经没有线程了，则尝试使用LOW pri线程池
   // special case -- if high-pri (flush) thread pool is empty, then schedule
   // flushes in low-pri (compaction) thread pool.
   if (is_flush_pool_empty) {
@@ -2420,6 +2432,7 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
     return;
   }
 
+  //如果当前没有flush待处理，则处理compaction
   while (bg_compaction_scheduled_ + bg_bottom_compaction_scheduled_ <
              bg_job_limits.max_compactions &&
          unscheduled_compactions_ > 0) {
@@ -2526,6 +2539,7 @@ ColumnFamilyData* DBImpl::PickCompactionFromQueue(
   return cfd;
 }
 
+//将对应的ColumnFamily加入到flush queue中.
 void DBImpl::SchedulePendingFlush(const FlushRequest& flush_req,
                                   FlushReason flush_reason) {
   mutex_.AssertHeld();
@@ -2549,6 +2563,7 @@ void DBImpl::SchedulePendingFlush(const FlushRequest& flush_req,
       // requesting a flush will mark the imm_needed as true.
       cfd->imm()->FlushRequested();
     }
+    //!将对应的ColumnFamily加入到flush queue中.
     if (!cfd->queued_for_flush() && cfd->imm()->IsFlushPending()) {
       cfd->Ref();
       cfd->set_queued_for_flush(true);
@@ -2557,6 +2572,7 @@ void DBImpl::SchedulePendingFlush(const FlushRequest& flush_req,
       flush_queue_.push_back(flush_req);
     }
   } else {
+    //atomic_flush
     for (auto& iter : flush_req) {
       ColumnFamilyData* cfd = iter.first;
       cfd->Ref();
@@ -2582,6 +2598,7 @@ void DBImpl::SchedulePendingPurge(std::string fname, std::string dir_to_sync,
   purge_files_.insert({{number, std::move(file_info)}});
 }
 
+  //调用BackgroundCallFlush执行真正的Flush操作
 void DBImpl::BGWorkFlush(void* arg) {
   FlushThreadArg fta = *(reinterpret_cast<FlushThreadArg*>(arg));
   delete reinterpret_cast<FlushThreadArg*>(arg);
@@ -2656,6 +2673,7 @@ void DBImpl::UnscheduleFlushCallback(void* arg) {
   TEST_SYNC_POINT("DBImpl::UnscheduleFlushCallback");
 }
 
+// BackgroundFlush主要功能是在flush_queue_中找到一个ColumnFamily然后刷新它的memtable到磁盘.
 Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
                                LogBuffer* log_buffer, FlushReason* reason,
                                Env::Priority thread_pri) {
@@ -2681,12 +2699,19 @@ Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
   std::vector<SuperVersionContext>& superversion_contexts =
       job_context->superversion_contexts;
   autovector<ColumnFamilyData*> column_families_not_to_flush;
+
+  //通过while循环获取一个cfd，获取cfd的函数为DBImpl::PopFirstFromFlushQueue，该函数从flush_queue_中pop出一个cfd。
+  //在确保当前cfd不是被drop或者是没有达到flush状态的cfd，则选择该cfd进行flush
+
   while (!flush_queue_.empty()) {
     // This cfd is already referenced
+
+    //从flush_queue_中pop出一个cfd
     const FlushRequest& flush_req = PopFirstFromFlushQueue();
     superversion_contexts.clear();
     superversion_contexts.reserve(flush_req.size());
 
+    //确保当前cfd不是被drop或者是没有达到flush状态的cfd
     for (const auto& iter : flush_req) {
       ColumnFamilyData* cfd = iter.first;
       if (immutable_db_options_.experimental_mempurge_threshold > 0.0) {
@@ -2709,6 +2734,7 @@ Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
   }
 
   if (!bg_flush_args.empty()) {
+    //获取当前cfd的设置信息
     auto bg_job_limits = GetBGJobLimits();
     for (const auto& arg : bg_flush_args) {
       ColumnFamilyData* cfd = arg.cfd_;
@@ -2722,6 +2748,7 @@ Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
           bg_job_limits.max_compactions, bg_flush_scheduled_,
           bg_compaction_scheduled_);
     }
+    //调用FlushMemtableToOutputFile，对当前cfd进行flush
     status = FlushMemTablesToOutputFiles(bg_flush_args, made_progress,
                                          job_context, log_buffer, thread_pri);
     TEST_SYNC_POINT("DBImpl::BackgroundFlush:BeforeFlush");
@@ -2754,15 +2781,21 @@ void DBImpl::BackgroundCallFlush(Env::Priority thread_pri) {
   {
     InstrumentedMutexLock l(&mutex_);
     assert(bg_flush_scheduled_);
+
+    //增加正在处理的flush计数：num_running_flushes++
     num_running_flushes_++;
 
+    //记录插入到pending_outputs_中的number
     std::unique_ptr<std::list<uint64_t>::iterator>
         pending_outputs_inserted_elem(new std::list<uint64_t>::iterator(
             CaptureCurrentFileNumberInPendingOutputs()));
     FlushReason reason;
 
+    //调用BackgroundFlush进行flush操作，传入参数：made_progress（默认false）、job_context、log_buffer
     Status s = BackgroundFlush(&made_progress, &job_context, &log_buffer,
                                &reason, thread_pri);
+
+    //当发生错误返回的状态不是ok的时候处理错误
     if (!s.ok() && !s.IsShutdownInProgress() && !s.IsColumnFamilyDropped() &&
         reason != FlushReason::kErrorRecovery) {
       // Wait a little bit before retrying background flush in
@@ -2784,8 +2817,11 @@ void DBImpl::BackgroundCallFlush(Env::Priority thread_pri) {
     }
 
     TEST_SYNC_POINT("DBImpl::BackgroundCallFlush:FlushFinish:0");
+
+    //从pending_outputs_中删除掉前面记录的elem，也就是当前memtable已经成功处理
     ReleaseFileNumberFromPendingOutputs(pending_outputs_inserted_elem);
 
+    // 处理flush失败时候的临时文件问题
     // If flush failed, we want to delete all temporary files that we might have
     // created. Thus, we force full scan in FindObsoleteFiles()
     FindObsoleteFiles(&job_context, !s.ok() && !s.IsShutdownInProgress() &&
@@ -2809,9 +2845,12 @@ void DBImpl::BackgroundCallFlush(Env::Priority thread_pri) {
     }
     TEST_SYNC_POINT("DBImpl::BackgroundCallFlush:ContextCleanedUp");
 
+    //正在运行的flush任务计数减1，同时被安排的flush任务数减1
     assert(num_running_flushes_ > 0);
     num_running_flushes_--;
     bg_flush_scheduled_--;
+
+    //调用MaybeScheduleFlushOrCompaction，尝试触发下一次flush或者compaction
     // See if there's more work to be done
     MaybeScheduleFlushOrCompaction();
     atomic_flush_install_cv_.SignalAll();

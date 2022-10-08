@@ -4,8 +4,10 @@
 //  (found in the LICENSE.Apache file in the root directory).
 
 #include "db/write_thread.h"
+
 #include <chrono>
 #include <thread>
+
 #include "db/column_family.h"
 #include "monitoring/perf_context_imp.h"
 #include "port/port.h"
@@ -59,6 +61,7 @@ uint8_t WriteThread::BlockingAwaitState(Writer* w, uint8_t goal_mask) {
   return state;
 }
 
+//! blog:https://kernelmaker.github.io/Rocksdb_Study_1
 uint8_t WriteThread::AwaitState(Writer* w, uint8_t goal_mask,
                                 AdaptationContext* ctx) {
   uint8_t state = 0;
@@ -226,6 +229,7 @@ bool WriteThread::LinkOne(Writer* w, std::atomic<Writer*>* newest_writer) {
   assert(w->state == STATE_INIT);
   Writer* writers = newest_writer->load(std::memory_order_relaxed);
   while (true) {
+    // 写停顿
     // If write stall in effect, and w->no_slowdown is not true,
     // block here until stall is cleared. If its true, then return
     // immediately
@@ -250,6 +254,8 @@ bool WriteThread::LinkOne(Writer* w, std::atomic<Writer*>* newest_writer) {
       }
     }
     w->link_older = writers;
+    //该函数是用的无锁链表实现了链表里面的Add语意，同时由于第一个加入链表的线程
+    //newest_writer == nullptr所以有 return (writers == nullptr)的返回值。
     if (newest_writer->compare_exchange_weak(writers, w)) {
       return (writers == nullptr);
     }
@@ -378,6 +384,9 @@ void WriteThread::EndWriteStall() {
 }
 
 static WriteThread::AdaptationContext jbg_ctx("JoinBatchGroup");
+
+//调用JoinBatchGroup加入此次需要写入的小组链表中。如果是第一个加入链表则成为此次写入的Leader，
+//通过LinkOne函数返回可知，如果自己不是Leader那么需要调用AwaitState在此等待其状态改变。
 void WriteThread::JoinBatchGroup(Writer* w) {
   TEST_SYNC_POINT_CALLBACK("WriteThread::JoinBatchGroup:Start", w);
   assert(w->batch != nullptr);
@@ -405,8 +414,10 @@ void WriteThread::JoinBatchGroup(Writer* w) {
      *      writes in parallel.
      */
     TEST_SYNC_POINT_CALLBACK("WriteThread::JoinBatchGroup:BeganWaiting", w);
-    AwaitState(w, STATE_GROUP_LEADER | STATE_MEMTABLE_WRITER_LEADER |
-                      STATE_PARALLEL_MEMTABLE_WRITER | STATE_COMPLETED,
+    //如果自己不是Leader那么需要调用AwaitState在此等待其状态改变
+    AwaitState(w,
+               STATE_GROUP_LEADER | STATE_MEMTABLE_WRITER_LEADER |
+                   STATE_PARALLEL_MEMTABLE_WRITER | STATE_COMPLETED,
                &jbg_ctx);
     TEST_SYNC_POINT_CALLBACK("WriteThread::JoinBatchGroup:DoneWaiting", w);
   }
@@ -440,10 +451,15 @@ size_t WriteThread::EnterAsBatchGroupLeader(Writer* leader,
   // (they emptied the list and then we added ourself as leader) or had to
   // explicitly wake us up (the list was non-empty when we added ourself,
   // so we have already received our MarkJoined).
+  // 通过 CreateMissingNewerLinks 函数来生成一个双向链表，
+  // 构建link_newer，使得可以从 Leader开始顺序写。
   CreateMissingNewerLinks(newest_writer);
 
   // Tricky. Iteration start (leader) is exclusive and finish
   // (newest_writer) is inclusive. Iteration goes from old to new.
+  //创建完成反向写请求链表之后，则开始计算有多少个写请求可以批量的进行，同时更新
+  // write_group 中的批量写尺寸以及个数等信息，EnterAsBatchGroupLeader
+  //取队列时会把此刻所有的 writer 一次性全取完。
   Writer* w = leader;
   while (w != newest_writer) {
     assert(w->link_newer);
@@ -487,7 +503,7 @@ size_t WriteThread::EnterAsBatchGroupLeader(Writer* leader,
       // Do not make batch too big
       break;
     }
-
+    // 更新write_group 中的批量写尺寸以及个数等信息
     w->write_group = write_group;
     size += batch_size;
     write_group->last_writer = w;
@@ -598,10 +614,10 @@ void WriteThread::LaunchParallelMemTableWriters(WriteGroup* write_group) {
   }
 }
 
-static WriteThread::AdaptationContext cpmtw_ctx("CompleteParallelMemTableWriter");
+static WriteThread::AdaptationContext cpmtw_ctx(
+    "CompleteParallelMemTableWriter");
 // This method is called by both the leader and parallel followers
 bool WriteThread::CompleteParallelMemTableWriter(Writer* w) {
-
   auto* write_group = w->write_group;
   if (!w->status.ok()) {
     std::lock_guard<std::mutex> guard(write_group->leader->StateMutex());
@@ -649,6 +665,7 @@ void WriteThread::ExitAsBatchGroupLeader(WriteGroup& write_group,
     status = write_group.status;
   }
 
+  //流水线写
   if (enable_pipelined_write_) {
     // Notify writers don't write to memtable to exit.
     for (Writer* w = last_writer; w != leader;) {
@@ -708,10 +725,11 @@ void WriteThread::ExitAsBatchGroupLeader(WriteGroup& write_group,
       next_leader->link_older = nullptr;
       SetState(next_leader, STATE_GROUP_LEADER);
     }
-    AwaitState(leader, STATE_MEMTABLE_WRITER_LEADER |
-                           STATE_PARALLEL_MEMTABLE_WRITER | STATE_COMPLETED,
+    AwaitState(leader,
+               STATE_MEMTABLE_WRITER_LEADER | STATE_PARALLEL_MEMTABLE_WRITER |
+                   STATE_COMPLETED,
                &eabgl_ctx);
-  } else {
+  } else {  //非流水线写
     Writer* head = newest_writer_.load(std::memory_order_acquire);
     if (head != last_writer ||
         !newest_writer_.compare_exchange_strong(head, nullptr)) {

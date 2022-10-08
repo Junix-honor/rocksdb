@@ -63,12 +63,15 @@ class WriteBufferManager final {
   // Returns true if pointer to cache is passed.
   bool cost_to_cache() const { return cache_res_mgr_ != nullptr; }
 
+  // 返回整体的write_buffer所使用的内存(memory_used_)
   // Returns the total memory used by memtables.
   // Only valid if enabled()
   size_t memory_usage() const {
     return memory_used_.load(std::memory_order_relaxed);
   }
 
+  // 返回整体的write_buffer将要被释放的内存(memory_active_)
+  // 比如一个memory table被标记为immutable,则表示这块内存将要被释放
   // Returns the total memory used by active memtables.
   size_t mutable_memtable_memory_usage() const {
     return memory_active_.load(std::memory_order_relaxed);
@@ -93,11 +96,13 @@ class WriteBufferManager final {
   // Should only be called from write thread
   bool ShouldFlush() const {
     if (enabled()) {
+      // memtable占用内存超过memtable总size的限制
       if (mutable_memtable_memory_usage() >
           mutable_limit_.load(std::memory_order_relaxed)) {
         return true;
       }
       size_t local_size = buffer_size();
+      //内存使用超过了总的buffer size并且其中memtable占用了超过一半的buffer size
       if (memory_usage() >= local_size &&
           mutable_memtable_memory_usage() >= local_size / 2) {
         // If the memory exceeds the buffer size, we trigger more aggressive

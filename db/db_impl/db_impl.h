@@ -2153,6 +2153,9 @@ class DBImpl : public DB {
   // and unscheduled_compactions_. That way we keep track of number of
   // compaction and flush threads we need to schedule. This scheduling is done
   // in MaybeScheduleFlushOrCompaction()
+  
+  // flush_queue_的队列会保存所有的将要被flush到磁盘的ColumnFamily.
+  // 只有当当前的ColumnFamily满足flush条件（cfd->imm()->IsFlushPending()）才会将此CF加入到flush队列
   // invariant(column family present in flush_queue_ <==>
   // ColumnFamilyData::pending_flush_ == true)
   std::deque<FlushRequest> flush_queue_;

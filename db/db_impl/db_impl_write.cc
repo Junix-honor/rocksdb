@@ -75,6 +75,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   if (my_batch == nullptr) {
     return Status::Corruption("Batch is nullptr!");
   }
+
+  // tracer_
   if (tracer_) {
     InstrumentedMutexLock lock(&trace_mutex_);
     if (tracer_) {
@@ -82,6 +84,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
       tracer_->Write(my_batch).PermitUncheckedError();
     }
   }
+
+  // option冲突检测，sync与disableWAL设置冲突，返回NotSurpport
   if (write_options.sync && write_options.disableWAL) {
     return Status::InvalidArgument("Sync writes has to enable WAL.");
   }
@@ -103,6 +107,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   assert(!WriteBatchInternal::IsLatestPersistentState(my_batch) ||
          disable_memtable);
 
+  // lower priority
   if (write_options.low_pri) {
     Status s = ThrottleLowPriWritesIfNeeded(write_options, my_batch);
     if (!s.ok()) {
@@ -110,6 +115,12 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     }
   }
 
+  /*
+  只写WAL不写memtable
+  two_wrote_queues_:
+        当设置时，我们使用一个单独的队列来处理不写入memtable的写操作。
+        在2PC中，这些是准备阶段的写操作。
+  */
   if (two_write_queues_ && disable_memtable) {
     AssignOrder assign_order =
         seq_per_batch_ ? kDoAssignOrder : kDontAssignOrder;
@@ -121,6 +132,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
                             kDontPublishLastSeq, disable_memtable);
   }
 
+  // 将unordered_write设置为true可以换取更高的写吞吐量，同时解除快照的不可变性保证。
+  // 默认情况下当它为false时，rocksdb不会为新的快照推进序列号，除非所有低序列号的写操作已经完成。
   if (immutable_db_options_.unordered_write) {
     const size_t sub_batch_cnt = batch_cnt != 0
                                      ? batch_cnt
@@ -148,17 +161,29 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     return status;
   }
 
+  // 是否打开了pipelined写入方式
   if (immutable_db_options_.enable_pipelined_write) {
     return PipelinedWriteImpl(write_options, my_batch, callback, log_used,
                               log_ref, disable_memtable, seq_used);
   }
 
+  //!核心代码
+
   PERF_TIMER_GUARD(write_pre_and_post_process_time);
+  //将此线程上的Batch请求封装成WriteThread::Writer，其本身就是一个链表的成员。
   WriteThread::Writer w(write_options, my_batch, callback, log_ref,
                         disable_memtable, batch_cnt, pre_release_callback);
+
+  //秒表
   StopWatch write_sw(immutable_db_options_.clock, stats_, DB_WRITE);
 
+  //调用JoinBatchGroup加入此次需要写入的小组链表中。如果是第一个加入链表则成为此次写入的Leader，
+  //通过LinkOne函数返回可知，如果自己不是Leader那么需要调用AwaitState在此等待其状态改变。
   write_thread_.JoinBatchGroup(&w);
+
+  // 1. 如果w为follower的话
+
+  //并发写memtable
   if (w.state == WriteThread::STATE_PARALLEL_MEMTABLE_WRITER) {
     // we are a non-leader in a parallel group
 
@@ -168,6 +193,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
 
       ColumnFamilyMemTablesImpl column_family_memtables(
           versions_->GetColumnFamilySet());
+
+      //写memtable
       w.status = WriteBatchInternal::InsertInto(
           &w, w.sequence, &column_family_memtables, &flush_scheduler_,
           &trim_history_scheduler_,
@@ -177,13 +204,20 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
 
       PERF_TIMER_START(write_pre_and_post_process_time);
     }
-
+    // 保证数据的有序性，阻塞等待组内的w全部写入完成
+    // 返回true表示组内还有一个w没有被阻塞，此时被阻塞的w的状态为LOCKING
     if (write_thread_.CompleteParallelMemTableWriter(&w)) {
       // we're responsible for exit batch group
       // TODO(myabandeh): propagate status to write_group
       auto last_sequence = w.write_group->last_sequence;
       versions_->SetLastSequence(last_sequence);
       MemTableInsertStatusCheck(w.status);
+      // 写入完成后退出该组，并设置w的状态为complete
+      // 注意：
+      // 一个组的结构就是一个双向链表，同时可以表示一个挂起队列和一个写队列
+      // 挂起队列：w.older有效 w.newer无效
+      // 写队列：w.older有效 w.newer有效
+      // 当写队列写完后会将后面挂起队列的w.newer激活使得当前挂起队列成为新的写队列
       write_thread_.ExitAsBatchGroupFollower(&w);
     }
     assert(w.state == WriteThread::STATE_COMPLETED);
@@ -199,6 +233,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // write is complete and leader has updated sequence
     return w.FinalStatus();
   }
+  // 2. w为leader
   // else we are the leader of the write batch group
   assert(w.state == WriteThread::STATE_GROUP_LEADER);
   Status status;
@@ -216,6 +251,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   bool need_log_sync = write_options.sync;
   bool need_log_dir_sync = need_log_sync && !log_dir_synced_;
   assert(!two_write_queues_ || !disable_memtable);
+
+  //! preprocess
   {
     // With concurrent writes we do preprocess only in the write thread that
     // also does write to memtable to avoid sync issue on shared data structure
@@ -224,6 +261,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // PreprocessWrite does its own perf timing.
     PERF_TIMER_STOP(write_pre_and_post_process_time);
 
+    //预处理write，判断写入是否合法，是否需要切换memtable等
     status = PreprocessWrite(write_options, &need_log_sync, &write_context);
     if (!two_write_queues_) {
       // Assign it after ::PreprocessWrite since the sequence might advance
@@ -236,13 +274,15 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   log::Writer* log_writer = logs_.back().writer;
 
   mutex_.Unlock();
-
+  //! Insert过程
   // Add to log and apply to memtable.  We can release the lock
   // during this phase since &w is currently responsible for logging
   // and protects against concurrent loggers and concurrent writes
   // into memtables
 
   TEST_SYNC_POINT("DBImpl::WriteImpl:BeforeLeaderEnters");
+  // 首先调用write_thread_的EnterAsBatchGroupLeader，传入参数w以及write_group，
+  // 这一步的作用主要是尽可能将能够一块写入memtable的writer都加入write group。
   last_batch_group_size_ =
       write_thread_.EnterAsBatchGroupLeader(&w, &write_group);
 
@@ -260,8 +300,12 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // assumed to be true.  Rule 3 is checked for each batch.  We could
     // relax rules 2 if we could prevent write batches from referring
     // more than once to a particular key.
+    //然后判断是否能并行插入memtable，parallel为ture的条件为设置中allow_concurrent_memtable_write选项为真
+    //并且write_group中writer个数大于1（默认情况下只有一个所以这个时候parallel为false）
     bool parallel = immutable_db_options_.allow_concurrent_memtable_write &&
                     write_group.size > 1;
+
+    // 统计write_group的相关信息
     size_t total_count = 0;
     size_t valid_batches = 0;
     size_t total_byte_size = 0;
@@ -288,6 +332,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // the seq per valid written key to mem.
     size_t seq_inc = seq_per_batch_ ? valid_batches : total_count;
 
+    //记录各种本次write相关的状态：NUMBER_KEYS_WRITTEN、BYTES_WRITETEN、WRITE_DONE_BY_SELF、WRITE_DONE_BY_OTHER
     const bool concurrent_update = two_write_queues_;
     // Update stats while we are an exclusive group leader, so we know
     // that nobody else can be writing to these particular stats.
@@ -312,18 +357,22 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     RecordInHistogram(stats_, BYTES_PER_WRITE, total_byte_size);
 
     if (write_options.disableWAL) {
+      // 如果开启了disableWAL选项，则将has_unpersisted_data_这个flag设置为true。
       has_unpersisted_data_.store(true, std::memory_order_relaxed);
     }
 
     PERF_TIMER_STOP(write_pre_and_post_process_time);
 
+    // 记录日志（WAL）
     if (!two_write_queues_) {
+      // 当two_write_queue_为false的时候，直接调用WriteToWAL函数写入WAL
       if (status.ok() && !write_options.disableWAL) {
         PERF_TIMER_GUARD(write_wal_time);
         io_s = WriteToWAL(write_group, log_writer, log_used, need_log_sync,
                           need_log_dir_sync, last_sequence + 1);
       }
     } else {
+      // 否则调用ConcurrentWriteToWAL
       if (status.ok() && !write_options.disableWAL) {
         PERF_TIMER_GUARD(write_wal_time);
         // LastAllocatedSequence is increased inside WriteToWAL under
@@ -339,6 +388,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     assert(last_sequence != kMaxSequenceNumber);
     const SequenceNumber current_sequence = last_sequence + 1;
     last_sequence += seq_inc;
+
+    //调用PreReleaseCallback，更新writer->sequence
 
     // PreReleaseCallback is called after WAL write and before memtable write
     if (status.ok()) {
@@ -371,10 +422,13 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
       }
     }
 
+    //写入memtable
     if (status.ok()) {
       PERF_TIMER_GUARD(write_memtable_time);
-
+      //不支持并发写memtable
       if (!parallel) {
+        // Leader 调用 InsertInto，对 write_group 进行遍历，
+        // 将 Leader 和 Follower 的 WriteBatch 写入。
         // w.sequence will be set inside InsertInto
         w.status = WriteBatchInternal::InsertInto(
             write_group, current_sequence, column_family_memtables_.get(),
@@ -382,11 +436,21 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
             write_options.ignore_missing_column_families,
             0 /*recovery_log_number*/, this, parallel, seq_per_batch_,
             batch_per_txn_);
-      } else {
+      } else {  //支持并发写memtable
         write_group.last_sequence = last_sequence;
+        // 调用 LaunchParallelMemTableWriters，遍历 write_group 把 Leader 和
+        // Follower 的状态都设置为
+        // STATE_PARALLEL_MEMTABLE_WRITER，将等待的线程唤醒。最后所有 writer
+        // 通过调用 InsertInto 来将 WriteBatch 写入 MemTable 中。writer 完成了
+        // MemTable 的写操作之后，都会调用 CompleteParallelMemTableWriter
+        // 函数。该函数会将该 write_group
+        // 中运行的任务数减一，当运行中的任务数为零的时候就代表了所有的线程都完成了操作，调用
+        // ExitAsMemTableWriter 把 Leader 的状态设置为
+        // STATE_COMPLETED，反之则会进入等待状态，等待当前其他的写任务完成。
         write_thread_.LaunchParallelMemTableWriters(&write_group);
         in_parallel_group = true;
 
+        // 将leader写入memtable
         // Each parallel follower is doing each own writes. The leader should
         // also do its own.
         if (w.ShouldWriteToMemtable()) {
@@ -409,6 +473,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   }
   PERF_TIMER_START(write_pre_and_post_process_time);
 
+  //状态检查
   if (!w.CallbackFailed()) {
     if (!io_s.ok()) {
       assert(pre_release_cb_status.ok());
@@ -420,6 +485,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     assert(io_s.ok() && pre_release_cb_status.ok());
   }
 
+  //同步
   if (need_log_sync) {
     mutex_.Lock();
     if (status.ok()) {
@@ -439,8 +505,10 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     }
   }
 
+  //关闭当前batch_group
   bool should_exit_batch_group = true;
   if (in_parallel_group) {
+    // 阻塞等待组类的w写memtable
     // CompleteParallelWorker returns true if this thread should
     // handle exit, false means somebody else did
     should_exit_batch_group = write_thread_.CompleteParallelMemTableWriter(&w);
@@ -452,6 +520,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
       versions_->SetLastSequence(last_sequence);
     }
     MemTableInsertStatusCheck(w.status);
+    // leader退出组之后会创建下一个leader
     write_thread_.ExitAsBatchGroupLeader(write_group, status);
   }
 
@@ -908,6 +977,11 @@ void DBImpl::MemTableInsertStatusCheck(const Status& status) {
 Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
                                bool* need_log_sync,
                                WriteContext* write_context) {
+  // 根据官方文档，memtable被flush有三个条件，满足其中之一则触发memtable的flush操作：
+  // 1.单个memtable的size超过writer_buffer_size
+  // 2.总memtable size超过db_write_buffer_size或者由write_bufer_namager发起了一次flush，此时会flush最大的那个memtable
+  // 3.WAL的总size超过max_total_wal_size，此时会将包含最老的数据的memtable给flush，这样让包含这部分数据的WAL可以释放
+
   mutex_.AssertHeld();
   assert(write_context != nullptr && need_log_sync != nullptr);
   Status status;
@@ -920,12 +994,18 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
 
   assert(!single_column_family_mode_ ||
          versions_->GetColumnFamilySet()->NumberOfColumnFamilies() == 1);
+
+  //表明总的log size超过了额定的阈值，
+  //此时需要更换WAL，调用函数SwitchWAL，传入write_context（满足flush条件3）
   if (UNLIKELY(status.ok() && !single_column_family_mode_ &&
                total_log_size_ > GetMaxTotalWalSize())) {
     WaitForPendingWrites();
+    //判断是否WAL的大小是否已经超过了设置的wal大小(max_total_wal_size).可以看到它的调用也是在每次写WAL之前
     status = SwitchWAL(write_context);
   }
 
+  // WriteBufferManager判断当前memtable需要dump（memtable达到了设定的阈值大小），
+  //调用函数HandleWriteBufferFull，传入write_context（满足条件2中总size超出阈值）
   if (UNLIKELY(status.ok() && write_buffer_manager_->ShouldFlush())) {
     // Before a new memtable is added in SwitchMemtable(),
     // write_buffer_manager_->ShouldFlush() will keep returning true. If another
@@ -940,6 +1020,8 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
     status = TrimMemtableHistory(write_context);
   }
 
+  //由write_bufer_namager发起了一次flush
+  //调用ScheduleFlushes，传入write_context（满足条件2中的wbm触发）
   if (UNLIKELY(status.ok() && !flush_scheduler_.Empty())) {
     WaitForPendingWrites();
     status = ScheduleFlushes(write_context);
@@ -948,6 +1030,7 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
   PERF_TIMER_STOP(write_scheduling_flushes_compactions_time);
   PERF_TIMER_GUARD(write_pre_and_post_process_time);
 
+  //与write_controler相关，调用DelayWrite函数，传入last_batch_group_size以及write_options
   if (UNLIKELY(status.ok() && (write_controller_.IsStopped() ||
                                write_controller_.NeedsDelay()))) {
     PERF_TIMER_STOP(write_pre_and_post_process_time);
@@ -974,6 +1057,7 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
     }
   }
 
+  //等待log同步完成
   if (status.ok() && *need_log_sync) {
     // Wait until the parallel syncs are finished. Any sync process has to sync
     // the front log too so it is enough to check the status of front()
@@ -1084,6 +1168,8 @@ IOStatus DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
                             SequenceNumber sequence) {
   IOStatus io_s;
   assert(!write_group.leader->disable_wal);
+
+  //生成merged_batch
   // Same holds for all in the batch group
   size_t write_with_wal = 0;
   WriteBatch* to_be_cached_state = nullptr;
@@ -1099,6 +1185,7 @@ IOStatus DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
 
   WriteBatchInternal::SetSequence(merged_batch, sequence);
 
+  //调用真正的WriteToWAL
   uint64_t log_size;
   io_s = WriteToWAL(*merged_batch, log_writer, log_used, &log_size);
   if (to_be_cached_state) {
@@ -1106,6 +1193,7 @@ IOStatus DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
     cached_recoverable_state_empty_ = false;
   }
 
+  // sync操作
   if (io_s.ok() && need_log_sync) {
     StopWatch sw(immutable_db_options_.clock, stats_, WAL_FILE_SYNC_MICROS);
     // It's safe to access logs_ with unlocked mutex_ here because:
@@ -1151,6 +1239,8 @@ IOStatus DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
   if (merged_batch == &tmp_batch_) {
     tmp_batch_.Clear();
   }
+
+  //记录状态
   if (io_s.ok()) {
     auto stats = default_cf_internal_stats_;
     if (need_log_sync) {
@@ -1389,6 +1479,8 @@ Status DBImpl::SwitchWAL(WriteContext* write_context) {
   return status;
 }
 
+//这个函数主要是处理所有ColumnFamily的memtable内存超过限制的情况．
+//可以看到它会调用SwitchMemtable然后再将对应的cfd加入到flush_queue_,最后再来调用后台刷新线程.
 Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
   mutex_.AssertHeld();
   assert(write_context != nullptr);
@@ -1413,7 +1505,7 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
   } else {
     ColumnFamilyData* cfd_picked = nullptr;
     SequenceNumber seq_num_for_cf_picked = kMaxSequenceNumber;
-
+    //!遍历ColumnFamily，挑选mem的seq值最小的cfd
     for (auto cfd : *versions_->GetColumnFamilySet()) {
       if (cfd->IsDropped()) {
         continue;
@@ -1438,6 +1530,8 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
   if (two_write_queues_) {
     nonmem_write_thread_.EnterUnbatched(&nonmem_w, &mutex_);
   }
+
+  //!调用SwitchMemtable
   for (const auto cfd : cfds) {
     if (cfd->mem()->IsEmpty()) {
       continue;
@@ -1457,6 +1551,7 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
     if (immutable_db_options_.atomic_flush) {
       AssignAtomicFlushSeq(cfds);
     }
+    //!将对应的cfd加入到flush_queue_
     for (const auto cfd : cfds) {
       cfd->imm()->FlushRequested();
       if (!immutable_db_options_.atomic_flush) {
@@ -1470,6 +1565,7 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
       GenerateFlushRequest(cfds, &flush_req);
       SchedulePendingFlush(flush_req, FlushReason::kWriteBufferManager);
     }
+    //!flush
     MaybeScheduleFlushOrCompaction();
   }
   return status;
@@ -1746,6 +1842,7 @@ void DBImpl::NotifyOnMemTableSealed(ColumnFamilyData* /*cfd*/,
 }
 #endif  // ROCKSDB_LITE
 
+// SwitchMemtable的主要是为一个ColumnFamily更换Memtable同时新建一个WAL的过程
 // REQUIRES: mutex_ is held
 // REQUIRES: this thread is currently at the front of the writer queue
 // REQUIRES: this thread is currently at the front of the 2nd writer queue if
@@ -1769,6 +1866,8 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   if (two_write_queues_) {
     log_write_mutex_.Lock();
   }
+
+  // !首先判断是否能够循环使用log，如果是则从log_recycle_files队列中pop一个出来作为新的log使用
   bool creating_new_log = !log_empty_;
   if (two_write_queues_) {
     log_write_mutex_.Unlock();
@@ -1797,6 +1896,10 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   const auto preallocate_block_size =
       GetWalPreallocateBlockSize(mutable_cf_options.write_buffer_size);
   mutex_.Unlock();
+
+  //!在需要创建新的log file的情况下调用VersionSet::NewFileNumber分配一个新的log number
+  //!并创建的新的WritableFile，而对于recycle的情况，则是新建ReuseWritableFile。
+  //!然后通过新的WritableFile创建新的log::Writer
   if (creating_new_log) {
     // TODO: Write buffer size passed in should be max of all CF's instead
     // of mutable_cf_options.write_buffer_size.
@@ -1807,6 +1910,8 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     }
   }
   if (s.ok()) {
+    //!获取当前的seq，并以这个seq调用cfd的ConstructNewMemtable创建新的memtable，
+    //!同时通过context创建新的SuperVersion
     SequenceNumber seq = versions_->LastSequence();
     new_mem = cfd->ConstructNewMemtable(mutable_cf_options, seq);
     context->superversion_context.NewSuperVersion();
@@ -1824,9 +1929,11 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     assert(log_recycle_files_.front() == recycle_log_number);
     log_recycle_files_.pop_front();
   }
+
   if (s.ok() && creating_new_log) {
     log_write_mutex_.Lock();
     assert(new_log != nullptr);
+    //!刷新上一个日志的缓冲区
     if (!logs_.empty()) {
       // Alway flush the buffer of the last log before switching to a new one
       log::Writer* cur_log_writer = logs_.back().writer;
@@ -1842,6 +1949,7 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
                        new_log_number);
       }
     }
+    //!将新的log number添加到alive_log_file
     if (s.ok()) {
       logfile_number_ = new_log_number;
       log_empty_ = true;
@@ -1871,6 +1979,7 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   }
 
   bool empty_cf_updated = false;
+  //! track the WAL obsoletion event
   if (immutable_db_options_.track_and_verify_wals_in_manifest &&
       !immutable_db_options_.allow_2pc && creating_new_log) {
     // In non-2pc mode, WALs become obsolete if they do not contain unflushed
@@ -1918,6 +2027,8 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
       empty_cf_updated = true;
     }
   }
+  //!遍历所有的cfd，对于包含memtable还没使用以及imm列表中没有flush的imm为0的cfd，
+  //!即cf->IsEmpty()，更新他们的log number以及memtable的seq
   if (!empty_cf_updated) {
     for (auto cf : *versions_->GetColumnFamilySet()) {
       // all this is just optimization to delete logs that
@@ -1933,11 +2044,14 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     }
   }
 
+  //!将新的memtable替换到cfd内同时将旧的加入到imm列表
   cfd->mem()->SetNextLogNumber(logfile_number_);
   assert(new_mem != nullptr);
   cfd->imm()->Add(cfd->mem(), &context->memtables_to_free_);
   new_mem->Ref();
   cfd->SetMemtable(new_mem);
+  //!最后调用InstallSuperVersionAndScheduleWork，
+  //!该函数构建新的SuperVersion并替换，同时触发对当前cfd的flush以及compaction操作
   InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,
                                      mutable_cf_options);
 
