@@ -170,6 +170,7 @@ void FlushJob::PickMemTable() {
   db_mutex_->AssertHeld();
   assert(!pick_memtable_called);
   pick_memtable_called = true;
+  //! 获取一个memtable的list
   // Save the contents of the earliest memtable as a new Table
   cfd_->imm()->PickMemtablesToFlush(max_memtable_id_, &mems_);
   if (mems_.empty()) {
@@ -178,6 +179,8 @@ void FlushJob::PickMemTable() {
 
   ReportFlushInputSize(mems_);
 
+  //! 从memtable列表中获取第一个memtable，
+  //! 使用其edit结构来保存本次flush的元信息（lognumber、cf_id）
   // entries mems are (implicitly) sorted in ascending order by their created
   // time. We will use the first memtable's `edit` to keep the meta info for
   // this flush.
@@ -189,6 +192,7 @@ void FlushJob::PickMemTable() {
   edit_->SetLogNumber(mems_.back()->GetNextLogNumber());
   edit_->SetColumnFamily(cfd_->GetID());
 
+  //! 调用version_set的NewFileNumber接口为新的文件生成一个filenumber
   // path 0 for level 0 file.
   meta_.fd = FileDescriptor(versions_->NewFileNumber(), 0, 0);
 
@@ -209,7 +213,7 @@ Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
     return Status::OK();
   }
 
-  // I/O measurement variables
+  //*I/O measurement variables
   PerfLevel prev_perf_level = PerfLevel::kEnableTime;
   uint64_t prev_write_nanos = 0;
   uint64_t prev_fsync_nanos = 0;
@@ -227,6 +231,8 @@ Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
     prev_cpu_write_nanos = IOSTATS(cpu_write_nanos);
     prev_cpu_read_nanos = IOSTATS(cpu_read_nanos);
   }
+
+  //*mem purge
   Status mempurge_s = Status::NotFound("No MemPurge.");
   if ((db_options_.experimental_mempurge_threshold > 0.0) &&
       (cfd_->GetFlushReason() == FlushReason::kWriteBufferFull) &&
@@ -261,6 +267,7 @@ Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
     base_->Unref();
     s = Status::OK();
   } else {
+    //!写数据的过程
     // This will release and re-acquire the mutex.
     s = WriteLevel0Table();
   }
@@ -276,6 +283,7 @@ Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
   if (!s.ok()) {
     cfd_->imm()->RollbackMemtableFlush(mems_, meta_.fd.GetNumber());
   } else if (write_manifest_) {
+    //! flush job write to MANIFEST after successfully flushing memtables
     TEST_SYNC_POINT("FlushJob::InstallResults");
     // Replace immutable memtable with the generated Table
     IOStatus tmp_io_s;
@@ -295,7 +303,7 @@ Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
     *file_meta = meta_;
   }
   RecordFlushIOStats();
-
+  //! measure io stats
   // When measure_io_stats_ is true, the default 512 bytes is not enough.
   auto stream = event_logger_->LogToBuffer(log_buffer_, 1024);
   stream << "job" << job_context_->job_id << "event"
@@ -784,6 +792,8 @@ bool FlushJob::MemPurgeDecider() {
           threshold);
 }
 
+// 该函数为真正进行读写数据的函数，在该函数内将FlushJob中挑选出来的
+// 所有Memtable进行Merge然后构造成sstable并写到L0
 Status FlushJob::WriteLevel0Table() {
   AutoThreadOperationStageUpdater stage_updater(
       ThreadStatus::STAGE_FLUSH_WRITE_L0);
@@ -795,6 +805,7 @@ Status FlushJob::WriteLevel0Table() {
   std::vector<BlobFileAddition> blob_file_additions;
 
   {
+    //!构造一个write_hint,WriteHint是用来提示RocksDB中写数据位置的一项优化措施
     auto write_hint = cfd_->CalculateSSTWriteHint(0);
     db_mutex_->Unlock();
     if (log_buffer_) {
@@ -812,12 +823,15 @@ Status FlushJob::WriteLevel0Table() {
     uint64_t total_num_entries = 0, total_num_deletes = 0;
     uint64_t total_data_size = 0;
     size_t total_memory_usage = 0;
+    //!遍历待合并的Imm集合
     for (MemTable* m : mems_) {
       ROCKS_LOG_INFO(
           db_options_.info_log,
           "[%s] [JOB %d] Flushing memtable with next log file: %" PRIu64 "\n",
           cfd_->GetName().c_str(), job_context_->job_id, m->GetNextLogNumber());
+      // 待flush的数据：构造InternalIterator迭代器数组
       memtables.push_back(m->NewIterator(ro, &arena));
+      // 待删除的数据：构造FragmentedRangeTombstoneIterator迭代器数组
       auto* range_del_iter =
           m->NewRangeTombstoneIterator(ro, kMaxSequenceNumber);
       if (range_del_iter != nullptr) {
@@ -839,6 +853,7 @@ Status FlushJob::WriteLevel0Table() {
                          << GetFlushReasonString(cfd_->GetFlushReason());
 
     {
+      //!基于InternalIterator构造NewMergingIterator归并迭代器，基于最小堆实现多路归并算法；
       ScopedArenaIterator iter(
           NewMergingIterator(&cfd_->internal_comparator(), memtables.data(),
                              static_cast<int>(memtables.size()), &arena));
@@ -894,6 +909,7 @@ Status FlushJob::WriteLevel0Table() {
           TableFileCreationReason::kFlush, creation_time, oldest_key_time,
           current_time, db_id_, db_session_id_, 0 /* target_file_size */,
           meta_.fd.GetNumber());
+      //!BuildTable:将数据写入sst中
       s = BuildTable(
           dbname_, versions_, db_options_, tboptions, file_options_,
           cfd_->table_cache(), iter.get(), std::move(range_del_iters), &meta_,
@@ -936,6 +952,7 @@ Status FlushJob::WriteLevel0Table() {
                    s.ToString().c_str(),
                    meta_.marked_for_compaction ? " (needs compaction)" : "");
 
+    //!处理完成之后如果output_file_directory不为空则同步该目录(output_file_directory_->Fsync())
     if (s.ok() && output_file_directory_ != nullptr && sync_output_directory_) {
       s = output_file_directory_->FsyncWithDirOptions(
           IOOptions(), nullptr,
@@ -946,6 +963,7 @@ Status FlushJob::WriteLevel0Table() {
   }
   base_->Unref();
 
+  //!调用edit_->AddFile，将生成的文件添加到L0
   // Note that if file_size is zero, the file has been deleted and
   // should not be added to the manifest.
   const bool has_output = meta_.fd.GetFileSize() > 0;
@@ -973,6 +991,7 @@ Status FlushJob::WriteLevel0Table() {
   mems_[0]->SetFlushJobInfo(GetFlushJobInfo());
 #endif  // !ROCKSDB_LITE
 
+  //!记录本次Flush的状态
   // Note that here we treat flush as level 0 compaction in internal stats
   InternalStats::CompactionStats stats(CompactionReason::kFlush, 1);
   const uint64_t micros = clock_->NowMicros() - start_micros;

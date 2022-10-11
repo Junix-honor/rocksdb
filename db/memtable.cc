@@ -148,7 +148,8 @@ size_t MemTable::ApproximateMemoryUsage() {
   // otherwise, return the actual usage
   return total_usage;
 }
-
+// 这个函数主要的判断就是判断是否当前MemTable的内存使用是否超过了
+// write_buffer_size，如果超过了，那么就返回true.
 bool MemTable::ShouldFlushNow() {
   size_t write_buffer_size = write_buffer_size_.load(std::memory_order_relaxed);
   // In a lot of times, we cannot allocate arena blocks that exactly matches the

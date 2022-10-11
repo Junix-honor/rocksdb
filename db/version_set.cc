@@ -2679,12 +2679,15 @@ uint32_t GetExpiredTtlFilesCount(const ImmutableOptions& ioptions,
 }
 }  // anonymous namespace
 
+// 等价于leveldb::void VersionSet::Finalize(Version* v)
 void VersionStorageInfo::ComputeCompactionScore(
     const ImmutableOptions& immutable_options,
     const MutableCFOptions& mutable_cf_options) {
+  // 对level-0和其他的level区别处理
   for (int level = 0; level <= MaxInputLevel(); level++) {
     double score;
     if (level == 0) {
+      //*level-0的情况
       // We treat level-0 specially by bounding the number of files
       // instead of number of bytes for two reasons:
       //
@@ -2698,6 +2701,7 @@ void VersionStorageInfo::ComputeCompactionScore(
       // overwrites/deletions).
       int num_sorted_runs = 0;
       uint64_t total_size = 0;
+      //!1.首先会计算level-0下所有文件的大小(total_size)以及文件个数(num_sorted_runs).
       for (auto* f : files_[level]) {
         if (!f->being_compacted) {
           total_size += f->compensated_file_size;
@@ -2741,8 +2745,12 @@ void VersionStorageInfo::ComputeCompactionScore(
               score);
         }
       } else {
+        //!2.用文件个数除以level0_file_num_compaction_trigger来得到对应的score
         score = static_cast<double>(num_sorted_runs) /
                 mutable_cf_options.level0_file_num_compaction_trigger;
+        //! 3.如果当前不止一层level,那么将会从上面的score和(total_size/max_bytes_for_level_base)取最大值
+        //!之所以要做第三步，主要还是为了防止level-0的文件size过大，那么当它需要compact的时候有可能会需要和level-1
+        //!compact,那么此时就有可能会有一个很大的compact.
         if (compaction_style_ == kCompactionStyleLevel && num_levels() > 1) {
           // Level-based involves L0->L0 compactions that can lead to oversized
           // L0 files. Take into account size as well to avoid later giant
@@ -2765,13 +2773,16 @@ void VersionStorageInfo::ComputeCompactionScore(
         }
       }
     } else {
+      //*非level-0的情况
       // Compute the ratio of current size to size limit.
       uint64_t level_bytes_no_compacting = 0;
+      //!计算level的文件大小
       for (auto f : files_[level]) {
         if (!f->being_compacted) {
           level_bytes_no_compacting += f->compensated_file_size;
         }
       }
+      //!然后再除以MaxBytesForLevel，然后得到当前level的score
       score = static_cast<double>(level_bytes_no_compacting) /
               MaxBytesForLevel(level);
     }
@@ -3643,6 +3654,7 @@ uint64_t VersionStorageInfo::MaxNextLevelOverlappingBytes() {
   return result;
 }
 
+//!这个函数的作用就是得到当前level的最大的文件大小
 uint64_t VersionStorageInfo::MaxBytesForLevel(int level) const {
   // Note: the result for level zero is not really used since we set
   // the level-0 compaction threshold based on number of files.
@@ -3670,6 +3682,7 @@ void VersionStorageInfo::CalculateBaseBytes(const ImmutableOptions& ioptions,
 
   level_max_bytes_.resize(ioptions.num_levels);
   if (!ioptions.level_compaction_dynamic_level_bytes) {
+    //*level_compaction_dynamic_level_bytes is false
     base_level_ = (ioptions.compaction_style == kCompactionStyleLevel) ? 1 : -1;
 
     // Calculate for static bytes base case
@@ -3677,6 +3690,12 @@ void VersionStorageInfo::CalculateBaseBytes(const ImmutableOptions& ioptions,
       if (i == 0 && ioptions.compaction_style == kCompactionStyleUniversal) {
         level_max_bytes_[i] = options.max_bytes_for_level_base;
       } else if (i > 1) {
+        // If level_compaction_dynamic_level_bytes is false, then level targets
+        // are determined as following: L1's target will be
+        // max_bytes_for_level_base. And then Target_Size(Ln+1) =
+        // Target_Size(Ln) * max_bytes_for_level_multiplier *
+        // max_bytes_for_level_multiplier_additional[n].
+        // max_bytes_for_level_multiplier_additional is by default all 1.
         level_max_bytes_[i] = MultiplyCheckOverflow(
             MultiplyCheckOverflow(level_max_bytes_[i - 1],
                                   options.max_bytes_for_level_multiplier),
@@ -3686,6 +3705,7 @@ void VersionStorageInfo::CalculateBaseBytes(const ImmutableOptions& ioptions,
       }
     }
   } else {
+    //*level_compaction_dynamic_level_bytes is true
     uint64_t max_level_size = 0;
 
     int first_non_empty_level = -1;

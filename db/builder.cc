@@ -98,7 +98,7 @@ Status BuildTable(
         range_del_iter->total_tombstone_payload_bytes();
     range_del_agg->AddTombstones(std::move(range_del_iter));
   }
-
+  //!TableFileName:构造flush的文件名
   std::string fname = TableFileName(ioptions.cf_paths, meta->fd.GetNumber(),
                                     meta->fd.GetPathId());
   std::vector<std::string> blob_file_paths;
@@ -144,6 +144,7 @@ Status BuildTable(
       bool use_direct_writes = file_options.use_direct_writes;
       TEST_SYNC_POINT_CALLBACK("BuildTable:create_file", &use_direct_writes);
 #endif  // !NDEBUG
+      //!NewWritableFile:创建新的文件
       IOStatus io_s = NewWritableFile(fs, fname, &file, file_options);
       assert(s.ok());
       s = io_s;
@@ -161,12 +162,14 @@ Status BuildTable(
       FileTypeSet tmp_set = ioptions.checksum_handoff_file_types;
       file->SetIOPriority(io_priority);
       file->SetWriteLifeTimeHint(write_hint);
+      //! WritableFileWriter：构造writer
       file_writer.reset(new WritableFileWriter(
           std::move(file), fname, file_options, ioptions.clock, io_tracer,
           ioptions.stats, ioptions.listeners,
           ioptions.file_checksum_gen_factory.get(),
           tmp_set.Contains(FileType::kTableFile), false));
 
+      //!NewTableBuilder：构建table builder
       builder = NewTableBuilder(tboptions, file_writer.get());
     }
 
@@ -185,7 +188,7 @@ Status BuildTable(
                   io_tracer, blob_callback, blob_creation_reason,
                   &blob_file_paths, blob_file_additions)
             : nullptr);
-
+    //! CompactionIterator：构建合并迭代器
     CompactionIterator c_iter(
         iter, tboptions.internal_comparator.user_comparator(), &merge,
         kMaxSequenceNumber, &snapshots, earliest_write_conflict_snapshot,
@@ -199,6 +202,7 @@ Status BuildTable(
         full_history_ts_low);
 
     c_iter.SeekToFirst();
+    //!遍历迭代器，调用BlockBasedTableBuilder.Add方法逐一添加k/v数据,中间可能触发flush
     for (; c_iter.Valid(); c_iter.Next()) {
       const Slice& key = c_iter.key();
       const Slice& value = c_iter.value();

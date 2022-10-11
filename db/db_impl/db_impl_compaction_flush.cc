@@ -162,6 +162,7 @@ Status DBImpl::FlushMemTableToOutputFile(
   assert(cfd->imm()->IsFlushPending());
   assert(versions_);
   assert(versions_->GetColumnFamilySet());
+  //! needs_to_sync_closed_wals
   // If there are more than one column families, we need to make sure that
   // all the log files except the most recent one are synced. Otherwise if
   // the host crashes after flushing and before WAL is persistent, the
@@ -180,6 +181,7 @@ Status DBImpl::FlushMemTableToOutputFile(
   uint64_t max_memtable_id = needs_to_sync_closed_wals
                                  ? cfd->imm()->GetLatestMemTableID()
                                  : port::kMaxUint64;
+  //! initial flush job
   FlushJob flush_job(
       dbname_, cfd, immutable_db_options_, mutable_cf_options, max_memtable_id,
       file_options_for_compaction_, versions_.get(), &mutex_, &shutting_down_,
@@ -197,6 +199,7 @@ Status DBImpl::FlushMemTableToOutputFile(
   NotifyOnFlushBegin(cfd, &file_meta, mutable_cf_options, job_context->job_id);
 #endif  // ROCKSDB_LITE
 
+  //! SyncClosedLogs
   Status s;
   bool need_cancel = false;
   IOStatus log_io_s = IOStatus::OK();
@@ -212,6 +215,7 @@ Status DBImpl::FlushMemTableToOutputFile(
   }
   s = log_io_s;
 
+  //! pick memtable
   // If the log sync failed, we do not need to pick memtable. Otherwise,
   // num_flush_not_started_ needs to be rollback.
   TEST_SYNC_POINT("DBImpl::FlushMemTableToOutputFile:BeforePickMemtables");
@@ -222,6 +226,8 @@ Status DBImpl::FlushMemTableToOutputFile(
   TEST_SYNC_POINT_CALLBACK(
       "DBImpl::FlushMemTableToOutputFile:AfterPickMemtables", &flush_job);
   bool switched_to_mempurge = false;
+
+  //! run the flush job
   // Within flush_job.Run, rocksdb may call event listener to notify
   // file creation and deletion.
   //
@@ -243,6 +249,7 @@ Status DBImpl::FlushMemTableToOutputFile(
     s = io_s;
   }
 
+  //! InstallSuperVersionAndScheduleWork
   if (s.ok()) {
     InstallSuperVersionAndScheduleWork(cfd, superversion_context,
                                        mutable_cf_options);
@@ -1933,6 +1940,7 @@ void DBImpl::GenerateFlushRequest(const autovector<ColumnFamilyData*>& cfds,
   }
 }
 
+// FlushMemTable，这个函数用来强制刷新刷新memtable到磁盘，比如用户直接调用Flush接口.
 Status DBImpl::FlushMemTable(ColumnFamilyData* cfd,
                              const FlushOptions& flush_options,
                              FlushReason flush_reason, bool writes_stopped) {
@@ -2681,6 +2689,7 @@ Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
 
   Status status;
   *reason = FlushReason::kOthers;
+  // error处理
   // If BG work is stopped due to an error, but a recovery is in progress,
   // that means this flush is part of the recovery. So allow it to go through
   if (!error_handler_.IsBGWorkStopped()) {
@@ -2700,9 +2709,8 @@ Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
       job_context->superversion_contexts;
   autovector<ColumnFamilyData*> column_families_not_to_flush;
 
-  //通过while循环获取一个cfd，获取cfd的函数为DBImpl::PopFirstFromFlushQueue，该函数从flush_queue_中pop出一个cfd。
-  //在确保当前cfd不是被drop或者是没有达到flush状态的cfd，则选择该cfd进行flush
-
+  //!通过while循环获取一个cfd，获取cfd的函数为DBImpl::PopFirstFromFlushQueue，该函数从flush_queue_中pop出一个cfd。
+  //!在确保当前cfd不是被drop或者是没有达到flush状态的cfd，则选择该cfd进行flush
   while (!flush_queue_.empty()) {
     // This cfd is already referenced
 
@@ -2748,7 +2756,7 @@ Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
           bg_job_limits.max_compactions, bg_flush_scheduled_,
           bg_compaction_scheduled_);
     }
-    //调用FlushMemtableToOutputFile，对当前cfd进行flush
+    //!调用FlushMemtableToOutputFile，对当前cfd进行flush
     status = FlushMemTablesToOutputFiles(bg_flush_args, made_progress,
                                          job_context, log_buffer, thread_pri);
     TEST_SYNC_POINT("DBImpl::BackgroundFlush:BeforeFlush");

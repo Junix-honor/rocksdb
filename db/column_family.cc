@@ -1401,6 +1401,10 @@ Status ColumnFamilyData::SetOptions(
 #endif  // ROCKSDB_LITE
 
 // REQUIRES: DB mutex held
+// write hint以enum的形式定义，每个选项表示对应数据的生命周期的长度
+// 在计算SST的write hint的时候是根据sst写入的目标level实现的，
+// 该模式只适用于leveled compaction，对于L0、L1是WLTH_MEDIUM，
+// L2是WLTH，LONG而L3及以上是WLTH_EXTREME
 Env::WriteLifeTimeHint ColumnFamilyData::CalculateSSTWriteHint(int level) {
   if (initial_cf_options_.compaction_style != kCompactionStyleLevel) {
     return Env::WLTH_NOT_SET;

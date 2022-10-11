@@ -19,6 +19,10 @@ namespace ROCKSDB_NAMESPACE {
 
 bool LevelCompactionPicker::NeedsCompaction(
     const VersionStorageInfo* vstorage) const {
+  // 当满足下列几个条件之一就将会更新compact队列:
+  // 1.有超时的sst(ExpiredTtlFiles)
+  // 2.files_marked_for_compaction_或者bottommost_files_marked_for_compaction_都不为空(后面会介绍这两个队列)
+  // 3.遍历所有的level的sst,然后判断是否需要compact：最核心的条件(上面两个队列都是在这里更新的).
   if (!vstorage->ExpiredTtlFiles().empty()) {
     return true;
   }

@@ -351,6 +351,7 @@ void MemTableList::PickMemtablesToFlush(uint64_t max_memtable_id,
   // However, when the mempurge feature is activated, new memtables with older
   // IDs will be added to the memlist. Therefore we std::sort(ret) at the end to
   // return a vector of memtables sorted by increasing memtable ID.
+  //!从后往前遍历memlist，挑选memtable
   for (auto it = memlist.rbegin(); it != memlist.rend(); ++it) {
     MemTable* m = *it;
     if (!atomic_flush && m->atomic_flush_seqno_ != kMaxSequenceNumber) {
@@ -377,6 +378,7 @@ void MemTableList::PickMemtablesToFlush(uint64_t max_memtable_id,
   // This is useful when the mempurge feature is activated
   // and the memtables are not guaranteed to be sorted in
   // the memlist vector.
+  //!对挑选的memtables进行排序，按照memtable id升序排列
   std::sort(ret->begin(), ret->end(),
             [](const MemTable* m1, const MemTable* m2) -> bool {
               return m1->GetID() < m2->GetID();

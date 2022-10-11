@@ -37,15 +37,19 @@ class WriteController {
 
   // When an actor (column family) requests a stop token, all writes will be
   // stopped until the stop token is released (deleted)
+  // stop token用于停止写入，直到压缩速率赶上写入速率
   std::unique_ptr<WriteControllerToken> GetStopToken();
   // When an actor (column family) requests a delay token, total delay for all
   // writes to the DB will be controlled under the delayed write rate. Every
   // write needs to call GetDelay() with number of bytes writing to the DB,
   // which returns number of microseconds to sleep.
+  // delay token用于延迟（减慢）写入速率，使写入速率达<=delayed_write_rate
+  // 这使得压缩债务能够以更快的速度减少
   std::unique_ptr<WriteControllerToken> GetDelayToken(
       uint64_t delayed_write_rate);
   // When an actor (column family) requests a moderate token, compaction
   // threads will be increased
+  // 当后台压缩线程应该增加时，使用CompactionPressureToken
   std::unique_ptr<WriteControllerToken> GetCompactionPressureToken();
 
   // these three metods are querying the state of the WriteController

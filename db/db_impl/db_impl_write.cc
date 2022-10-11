@@ -995,8 +995,7 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
   assert(!single_column_family_mode_ ||
          versions_->GetColumnFamilySet()->NumberOfColumnFamilies() == 1);
 
-  //表明总的log size超过了额定的阈值，
-  //此时需要更换WAL，调用函数SwitchWAL，传入write_context（满足flush条件3）
+  //表明总的log size超过了额定的阈值，此时需要更换WAL，调用函数SwitchWAL，传入write_context（满足flush条件3）
   if (UNLIKELY(status.ok() && !single_column_family_mode_ &&
                total_log_size_ > GetMaxTotalWalSize())) {
     WaitForPendingWrites();
@@ -1013,6 +1012,7 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
     // be flushed. We may end up with flushing much more DBs than needed. It's
     // suboptimal but still correct.
     WaitForPendingWrites();
+    //更换memtable并将旧的memtable加入flush队列触发flush
     status = HandleWriteBufferManagerFlush(write_context);
   }
 
@@ -1030,7 +1030,7 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
   PERF_TIMER_STOP(write_scheduling_flushes_compactions_time);
   PERF_TIMER_GUARD(write_pre_and_post_process_time);
 
-  //与write_controler相关，调用DelayWrite函数，传入last_batch_group_size以及write_options
+  // 与write_controler相关，调用DelayWrite函数，传入last_batch_group_size以及write_options
   if (UNLIKELY(status.ok() && (write_controller_.IsStopped() ||
                                write_controller_.NeedsDelay()))) {
     PERF_TIMER_STOP(write_pre_and_post_process_time);
@@ -1043,6 +1043,7 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
     PERF_TIMER_START(write_pre_and_post_process_time);
   }
 
+  // 与write_buffer_manager相关，调用WriteBufferManagerStallWrites函数
   // If memory usage exceeded beyond a certain threshold,
   // write_buffer_manager_->ShouldStall() returns true to all threads writing to
   // all DBs and writers will be stalled.
@@ -1377,11 +1378,17 @@ void DBImpl::AssignAtomicFlushSeq(const autovector<ColumnFamilyData*>& cfds) {
   }
 }
 
+// 该函数作用为WAL size超过了设定的阈值需要释放掉一部分log占用的空间，
+// 释放log按照时间顺序从最旧的开始然后遍历所有的cfd，
+// 对包含了小于最旧的log number的cfd进行flush
 Status DBImpl::SwitchWAL(WriteContext* write_context) {
   mutex_.AssertHeld();
   assert(write_context != nullptr);
   Status status;
 
+  // DB中维护了一个存放目前正在使用中的log的vector：alive_log_files_，
+  // 其中每一个元素记录了一个log的number、size以及是否被flush的标志位，
+  // !首先获取alive_log_files_中的第一个元素的log作为最老的一个log——oldest_alive_log
   if (alive_log_files_.begin()->getting_flushed) {
     return status;
   }
@@ -1430,6 +1437,7 @@ Status DBImpl::SwitchWAL(WriteContext* write_context) {
   if (immutable_db_options_.atomic_flush) {
     SelectColumnFamiliesForAtomicFlush(&cfds);
   } else {
+    //!遍历所有的cfd，对于包含了log_number小于等于oldest_alive_log的cfd都加入flush队列中等待flush
     for (auto cfd : *versions_->GetColumnFamilySet()) {
       if (cfd->IsDropped()) {
         continue;
@@ -1445,6 +1453,7 @@ Status DBImpl::SwitchWAL(WriteContext* write_context) {
     nonmem_write_thread_.EnterUnbatched(&nonmem_w, &mutex_);
   }
 
+  //!遍历等待flush的cfd,对该cfd调用SwitchMemtable
   for (const auto cfd : cfds) {
     cfd->Ref();
     status = SwitchMemtable(cfd, write_context);
@@ -1461,6 +1470,7 @@ Status DBImpl::SwitchWAL(WriteContext* write_context) {
     if (immutable_db_options_.atomic_flush) {
       AssignAtomicFlushSeq(cfds);
     }
+    //!遍历等待flush的cfd，对该cfd将其immutable_memtable列表imm标记为请求flush状态
     for (auto cfd : cfds) {
       cfd->imm()->FlushRequested();
       if (!immutable_db_options_.atomic_flush) {
@@ -1474,6 +1484,7 @@ Status DBImpl::SwitchWAL(WriteContext* write_context) {
       GenerateFlushRequest(cfds, &flush_req);
       SchedulePendingFlush(flush_req, FlushReason::kWalFull);
     }
+    //!调用MaybeScheduleFlushOrCompaction触发Flush或者Compaction
     MaybeScheduleFlushOrCompaction();
   }
   return status;
@@ -1505,7 +1516,7 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
   } else {
     ColumnFamilyData* cfd_picked = nullptr;
     SequenceNumber seq_num_for_cf_picked = kMaxSequenceNumber;
-    //!遍历ColumnFamily，挑选mem的seq值最小的cfd
+    //!遍历所有的cfd，对所有的包含非空memtable的cfd，选择其中CreationSeq最小的cfd
     for (auto cfd : *versions_->GetColumnFamilySet()) {
       if (cfd->IsDropped()) {
         continue;
@@ -1551,7 +1562,7 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
     if (immutable_db_options_.atomic_flush) {
       AssignAtomicFlushSeq(cfds);
     }
-    //!将对应的cfd加入到flush_queue_
+    //!如果成功则将该cfd的imm列表标记为请求flush并安排一次Flush(SchedulePendingFlush)
     for (const auto cfd : cfds) {
       cfd->imm()->FlushRequested();
       if (!immutable_db_options_.atomic_flush) {
@@ -1565,7 +1576,7 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
       GenerateFlushRequest(cfds, &flush_req);
       SchedulePendingFlush(flush_req, FlushReason::kWriteBufferManager);
     }
-    //!flush
+    //!调用MaybeScheduleFlushOrCompaction触发Flush或者Compaction
     MaybeScheduleFlushOrCompaction();
   }
   return status;
@@ -1771,6 +1782,8 @@ Status DBImpl::TrimMemtableHistory(WriteContext* context) {
   return Status::OK();
 }
 
+// 对所有在FlushScheduler中的cfd调用SwitchMemtable并Unref
+//（如果Unref之后引用数为0则delete掉该cfd）
 Status DBImpl::ScheduleFlushes(WriteContext* context) {
   autovector<ColumnFamilyData*> cfds;
   if (immutable_db_options_.atomic_flush) {

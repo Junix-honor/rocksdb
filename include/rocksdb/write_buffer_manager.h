@@ -95,14 +95,15 @@ class WriteBufferManager final {
 
   // Should only be called from write thread
   bool ShouldFlush() const {
+    //返回true的条件二者满足其一即可：
     if (enabled()) {
-      // memtable占用内存超过memtable总size的限制
+      // 1.memtable占用内存超过memtable总size的限制
       if (mutable_memtable_memory_usage() >
           mutable_limit_.load(std::memory_order_relaxed)) {
         return true;
       }
       size_t local_size = buffer_size();
-      //内存使用超过了总的buffer size并且其中memtable占用了超过一半的buffer size
+      //2.内存使用超过了总的buffer size并且其中memtable占用了超过一半的buffer size
       if (memory_usage() >= local_size &&
           mutable_memtable_memory_usage() >= local_size / 2) {
         // If the memory exceeds the buffer size, we trigger more aggressive
