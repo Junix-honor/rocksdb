@@ -103,29 +103,30 @@ struct ThreadPoolImpl::Impl {
 private:
  static void BGThreadWrapper(void* arg);
 
- bool low_io_priority_;
- CpuPriority cpu_priority_;
- Env::Priority priority_;
- Env* env_;
+ bool low_io_priority_;      // I/O 优先级
+ CpuPriority cpu_priority_;  // CPU 优先级
+ Env::Priority priority_;    // 线程优先级
+ Env* env_;                  // 获取当前线程池的环境变量
 
- int total_threads_limit_;
- std::atomic_uint queue_len_;  // Queue length. Used for stats reporting
- bool exit_all_threads_;
- bool wait_for_jobs_to_complete_;
+ int total_threads_limit_;         // 线程池线程总数
+ std::atomic_uint queue_len_;      // Queue length. Used for stats reporting
+                                   // 当前线程池中执行线程的排队长度
+ bool exit_all_threads_;           // 清理线程池时会调度所有未执行的线程
+ bool wait_for_jobs_to_complete_;  // 等待所有线程池的线程执行完毕
 
  // Entry per Schedule()/Submit() call
  struct BGItem {
    void* tag = nullptr;
-   std::function<void()> function;
-   std::function<void()> unschedFunction;
+   std::function<void()> function;  // 执行函数
+   std::function<void()> unschedFunction;  // 不执行函数
   };
 
   using BGQueue = std::deque<BGItem>;
-  BGQueue       queue_;
+  BGQueue queue_;  // deque 保存线程池中调度的线程相关的信息：线程函数、函数参数
 
   std::mutex               mu_;
-  std::condition_variable  bgsignal_;
-  std::vector<port::Thread> bgthreads_;
+  std::condition_variable bgsignal_;  // 条件变量，唤醒正在睡眠的线程
+  std::vector<port::Thread> bgthreads_;  // 保存需要调度的线程
 };
 
 inline ThreadPoolImpl::Impl::Impl()
@@ -151,13 +152,16 @@ void ThreadPoolImpl::Impl::JoinThreads(bool wait_for_jobs_to_complete) {
   assert(!exit_all_threads_);
 
   wait_for_jobs_to_complete_ = wait_for_jobs_to_complete;
+  // 原子（加锁）方式更新如下变量，用作在submit函数中屏蔽接收新的线程
   exit_all_threads_ = true;
+  // 重置线程池的线程上限，防止用户并发调用submit添加待调度线程
   // prevent threads from being recreated right after they're joined, in case
   // the user is concurrently submitting jobs.
   total_threads_limit_ = 0;
 
   lock.unlock();
 
+  // 唤醒所有等待在bgsignal_的线程
   bgsignal_.notify_all();
 
   for (auto& th : bgthreads_) {
@@ -262,7 +266,7 @@ void ThreadPoolImpl::Impl::BGThread(size_t thread_id) {
 
     TEST_SYNC_POINT_CALLBACK("ThreadPoolImpl::Impl::BGThread:BeforeRun",
                              &priority_);
-
+    // 执行线程函数
     func();
   }
 }
@@ -304,6 +308,7 @@ void ThreadPoolImpl::Impl::BGThreadWrapper(void* arg) {
   ThreadStatusUtil::RegisterThread(tp->GetHostEnv(), thread_type);
 #endif
   delete meta;
+  // 从待调度队列queue_中调度线程
   tp->BGThread(thread_id);
 #ifdef ROCKSDB_USING_THREAD_STATUS
   ThreadStatusUtil::UnregisterThread();
@@ -333,7 +338,7 @@ int ThreadPoolImpl::Impl::GetBackgroundThreads() {
 void ThreadPoolImpl::Impl::StartBGThreads() {
   // Start background thread if necessary
   while ((int)bgthreads_.size() < total_threads_limit_) {
-
+    // BGThreadWrapper更新当前执行的线程状态并启动一个调度队列中的线程
     port::Thread p_t(&BGThreadWrapper,
       new BGThreadMetadata(this, bgthreads_.size()));
 
@@ -356,18 +361,20 @@ void ThreadPoolImpl::Impl::StartBGThreads() {
 
 void ThreadPoolImpl::Impl::Submit(std::function<void()>&& schedule,
   std::function<void()>&& unschedule, void* tag) {
-
+  // 后续需要更新当前线程池的线程调度队列，需要保证更新过程的原子性
   std::lock_guard<std::mutex> lock(mu_);
-
+  // 需要销毁线程池了，不接受新的线程加入
   if (exit_all_threads_) {
     return;
   }
 
+  //启动后台线程
   StartBGThreads();
 
+  // 更新线程函数相关的信息 到线程调度队列尾部（双端队列）
   // Add to priority queue
   queue_.push_back(BGItem());
-
+  // 更新
   auto& item = queue_.back();
   item.tag = tag;
   item.function = std::move(schedule);
@@ -375,7 +382,7 @@ void ThreadPoolImpl::Impl::Submit(std::function<void()>&& schedule,
 
   queue_len_.store(static_cast<unsigned int>(queue_.size()),
     std::memory_order_relaxed);
-
+   // 如果正在执行的线程没有超过线程池线程数限制，则唤醒一个正在休眠的线程
   if (!HasExcessiveThread()) {
     // Wake up at least one waiting thread.
     bgsignal_.notify_one();

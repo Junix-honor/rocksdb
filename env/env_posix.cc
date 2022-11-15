@@ -212,9 +212,11 @@ class PosixEnv : public CompositeEnv {
   PosixEnv(const PosixEnv* default_env, const std::shared_ptr<FileSystem>& fs);
   ~PosixEnv() override {
     if (this == Env::Default()) {
+      // 通过Posix startthread 的接口调度的线程函数并发执行完毕
       for (const auto tid : threads_to_join_) {
         pthread_join(tid, nullptr);
       }
+      // 让不同优先级线程池中待执行线程执行完
       for (int pool_id = 0; pool_id < Env::Priority::TOTAL; ++pool_id) {
         thread_pools_[pool_id].JoinAllThreads();
       }
@@ -393,6 +395,8 @@ class PosixEnv : public CompositeEnv {
   std::vector<pthread_t> threads_to_join_storage_;
   bool allow_non_owner_access_storage_;
 
+  // 根据Env设置的线程优先级，为每一个优先级创建一个线程池（方便优先级线程池的调度）
+  // 创建多个线程池: enum Priority { BOTTOM, LOW, HIGH, USER, TOTAL };
   std::vector<ThreadPoolImpl>& thread_pools_;
   pthread_mutex_t& mu_;
   std::vector<pthread_t>& threads_to_join_;
@@ -410,6 +414,7 @@ PosixEnv::PosixEnv()
       threads_to_join_(threads_to_join_storage_),
       allow_non_owner_access_(allow_non_owner_access_storage_) {
   ThreadPoolImpl::PthreadCall("mutex_init", pthread_mutex_init(&mu_, nullptr));
+  // 根据优先级创建线程池，默认创建四个线程池，但一般只会用到两个(LOW,HIGH)
   for (int pool_id = 0; pool_id < Env::Priority::TOTAL; ++pool_id) {
     thread_pools_[pool_id].SetThreadPriority(
         static_cast<Env::Priority>(pool_id));
@@ -432,6 +437,7 @@ PosixEnv::PosixEnv(const PosixEnv* default_env,
 void PosixEnv::Schedule(void (*function)(void* arg1), void* arg, Priority pri,
                         void* tag, void (*unschedFunction)(void* arg)) {
   assert(pri >= Priority::BOTTOM && pri <= Priority::HIGH);
+  // 线程池的调度入口
   thread_pools_[pri].Schedule(function, arg, tag, unschedFunction);
 }
 
@@ -481,6 +487,9 @@ void PosixEnv::WaitForJoin() {
 // Default Posix Env
 //
 Env* Env::Default() {
+  // 创建Env,初始化几个类的单例
+  // 这里注意调用的顺序，先调用ThreadLocalPtr实例的初始化，再调用PosixEnv的
+  // 这样在Env析构的时候能够反方向析构，从而保证ThreadLocal的信息最后一个被清理
   // The following function call initializes the singletons of ThreadLocalPtr
   // right before the static default_env.  This guarantees default_env will
   // always being destructed before the ThreadLocalPtr singletons get
@@ -491,7 +500,8 @@ Env* Env::Default() {
   // of their construction, having this call here guarantees that
   // the destructor of static PosixEnv will go first, then the
   // the singletons of ThreadLocalPtr.
-  ThreadLocalPtr::InitSingletons();
+  ThreadLocalPtr::
+      InitSingletons();  // Threadlocal实例数据，用来访问当前db实例运行的线程状态信息
   CompressionContextCache::InitSingleton();
   INIT_SYNC_POINT_SINGLETONS();
   // ~PosixEnv must be called on exit

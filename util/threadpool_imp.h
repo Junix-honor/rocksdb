@@ -106,7 +106,7 @@ class ThreadPoolImpl : public ThreadPool {
    // and override the environment. This would require refactoring ThreadPool usage.
    //
    // We can also combine these two approaches
-   std::unique_ptr<Impl>   impl_;
+  std::unique_ptr<Impl> impl_;  // 线程池核心数据结构
 };
 
 }  // namespace ROCKSDB_NAMESPACE
