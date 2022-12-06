@@ -76,7 +76,9 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     return Status::Corruption("Batch is nullptr!");
   }
 
-  // tracer_
+  //! 初步处理
+
+  // tracer_：如果为true，则调用tracer_->Write，传入my_batch
   if (tracer_) {
     InstrumentedMutexLock lock(&trace_mutex_);
     if (tracer_) {
@@ -85,7 +87,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     }
   }
 
-  // option冲突检测，sync与disableWAL设置冲突，返回NotSurpport
+  //option冲突检测
   if (write_options.sync && write_options.disableWAL) {
     return Status::InvalidArgument("Sync writes has to enable WAL.");
   }
@@ -107,7 +109,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   assert(!WriteBatchInternal::IsLatestPersistentState(my_batch) ||
          disable_memtable);
 
-  // lower priority
+  //如果WriteOptions设置了low_pri选项，则调用函数ThrottleLowPriWritesIfNeeded
   if (write_options.low_pri) {
     Status s = ThrottleLowPriWritesIfNeeded(write_options, my_batch);
     if (!s.ok()) {
@@ -115,12 +117,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     }
   }
 
-  /*
-  只写WAL不写memtable
-  two_wrote_queues_:
-        当设置时，我们使用一个单独的队列来处理不写入memtable的写操作。
-        在2PC中，这些是准备阶段的写操作。
-  */
+  //如果two_write_queue_以及disableMemtable同时设置，则进入WriteImplWALOnly函数（只写WAL不写memtable）
+  // two_wrote_queues_:当设置时，我们使用一个单独的队列来处理不写入memtable的写操作。在2PC中，这些是准备阶段的写操作。
   if (two_write_queues_ && disable_memtable) {
     AssignOrder assign_order =
         seq_per_batch_ ? kDoAssignOrder : kDontAssignOrder;
@@ -132,6 +130,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
                             kDontPublishLastSeq, disable_memtable);
   }
 
+  //unordered_write
   // 将unordered_write设置为true可以换取更高的写吞吐量，同时解除快照的不可变性保证。
   // 默认情况下当它为false时，rocksdb不会为新的快照推进序列号，除非所有低序列号的写操作已经完成。
   if (immutable_db_options_.unordered_write) {
@@ -161,14 +160,13 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     return status;
   }
 
-  // 是否打开了pipelined写入方式
+  //如果enable_pipelined_write同时设置，则进入PipelinedWriteImpl
   if (immutable_db_options_.enable_pipelined_write) {
     return PipelinedWriteImpl(write_options, my_batch, callback, log_used,
                               log_ref, disable_memtable, seq_used);
   }
 
-  //!核心代码
-
+  //!核心代码开始，writer以及Write_Group
   PERF_TIMER_GUARD(write_pre_and_post_process_time);
   //将此线程上的Batch请求封装成WriteThread::Writer，其本身就是一个链表的成员。
   WriteThread::Writer w(write_options, my_batch, callback, log_ref,
@@ -181,7 +179,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   //通过LinkOne函数返回可知，如果自己不是Leader那么需要调用AwaitState在此等待其状态改变。
   write_thread_.JoinBatchGroup(&w);
 
-  // 1. 如果w为follower的话
+  // 1. w为follower的情况
 
   //并发写memtable
   if (w.state == WriteThread::STATE_PARALLEL_MEMTABLE_WRITER) {
@@ -223,7 +221,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     assert(w.state == WriteThread::STATE_COMPLETED);
     // STATE_COMPLETED conditional below handles exit
   }
-  if (w.state == WriteThread::STATE_COMPLETED) {
+  if (w.state == WriteThread::STATE_COMPLETED) { 
     if (log_used != nullptr) {
       *log_used = w.log_used;
     }
@@ -233,7 +231,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // write is complete and leader has updated sequence
     return w.FinalStatus();
   }
-  // 2. w为leader
+  // 2. w为leader的情况
   // else we are the leader of the write batch group
   assert(w.state == WriteThread::STATE_GROUP_LEADER);
   Status status;
@@ -252,7 +250,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   bool need_log_dir_sync = need_log_sync && !log_dir_synced_;
   assert(!two_write_queues_ || !disable_memtable);
 
-  //! preprocess
+  //! PreProcessWrite
   {
     // With concurrent writes we do preprocess only in the write thread that
     // also does write to memtable to avoid sync issue on shared data structure
@@ -261,7 +259,11 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // PreprocessWrite does its own perf timing.
     PERF_TIMER_STOP(write_pre_and_post_process_time);
 
-    //预处理write，判断写入是否合法，是否需要切换memtable等
+    // 当程序执行到此处说明当前writer是Group_Leader，
+    // 当two_write_queues_为false并且disable_memtable为false的时候，
+    // 进入PreProcessWrite函数进行预处理，该过程需要mutex加锁，传入参数write_options、need_log_sync、write_contex。
+    
+    // 预处理write，判断写入是否合法，是否需要切换memtable等
     status = PreprocessWrite(write_options, &need_log_sync, &write_context);
     if (!two_write_queues_) {
       // Assign it after ::PreprocessWrite since the sequence might advance
@@ -274,13 +276,14 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   log::Writer* log_writer = logs_.back().writer;
 
   mutex_.Unlock();
-  //! Insert过程
+  //! Insert过程——insert前的准备
   // Add to log and apply to memtable.  We can release the lock
   // during this phase since &w is currently responsible for logging
   // and protects against concurrent loggers and concurrent writes
   // into memtables
 
   TEST_SYNC_POINT("DBImpl::WriteImpl:BeforeLeaderEnters");
+  
   // 首先调用write_thread_的EnterAsBatchGroupLeader，传入参数w以及write_group，
   // 这一步的作用主要是尽可能将能够一块写入memtable的writer都加入write group。
   last_batch_group_size_ =
@@ -300,6 +303,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // assumed to be true.  Rule 3 is checked for each batch.  We could
     // relax rules 2 if we could prevent write batches from referring
     // more than once to a particular key.
+   
     //然后判断是否能并行插入memtable，parallel为ture的条件为设置中allow_concurrent_memtable_write选项为真
     //并且write_group中writer个数大于1（默认情况下只有一个所以这个时候parallel为false）
     bool parallel = immutable_db_options_.allow_concurrent_memtable_write &&
@@ -363,7 +367,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
 
     PERF_TIMER_STOP(write_pre_and_post_process_time);
 
-    // 记录日志（WAL）
+    //! Insert过程——记录日志（WAL）
+    // 将数据写入WAL中，此时有两种情况
     if (!two_write_queues_) {
       // 当two_write_queue_为false的时候，直接调用WriteToWAL函数写入WAL
       if (status.ok() && !write_options.disableWAL) {
@@ -390,7 +395,6 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     last_sequence += seq_inc;
 
     //调用PreReleaseCallback，更新writer->sequence
-
     // PreReleaseCallback is called after WAL write and before memtable write
     if (status.ok()) {
       SequenceNumber next_sequence = current_sequence;
@@ -421,8 +425,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
         }
       }
     }
-
-    //写入memtable
+    //! Insert过程——写入memtable
     if (status.ok()) {
       PERF_TIMER_GUARD(write_memtable_time);
       //不支持并发写memtable
@@ -471,6 +474,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
       }
     }
   }
+
+  //! Insert过程——后续处理
   PERF_TIMER_START(write_pre_and_post_process_time);
 
   //状态检查

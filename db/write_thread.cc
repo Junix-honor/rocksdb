@@ -61,7 +61,7 @@ uint8_t WriteThread::BlockingAwaitState(Writer* w, uint8_t goal_mask) {
   return state;
 }
 
-//! blog:https://kernelmaker.github.io/Rocksdb_Study_1
+// blog:https://kernelmaker.github.io/Rocksdb_Study_1
 uint8_t WriteThread::AwaitState(Writer* w, uint8_t goal_mask,
                                 AdaptationContext* ctx) {
   uint8_t state = 0;
@@ -224,21 +224,25 @@ void WriteThread::SetState(Writer* w, uint8_t new_state) {
   }
 }
 
+// 通过 CAS 无锁将多个线程的请求组成请求链表
 bool WriteThread::LinkOne(Writer* w, std::atomic<Writer*>* newest_writer) {
   assert(newest_writer != nullptr);
   assert(w->state == STATE_INIT);
   Writer* writers = newest_writer->load(std::memory_order_relaxed);
   while (true) {
-    // 写停顿
     // If write stall in effect, and w->no_slowdown is not true,
     // block here until stall is cleared. If its true, then return
     // immediately
+    // 写停顿
     if (writers == &write_stall_dummy_) {
+      // no_slowdown 为真，立刻返回
       if (w->no_slowdown) {
         w->status = Status::Incomplete("Write stall");
         SetState(w, STATE_COMPLETED);
         return false;
       }
+
+      // no_slowdown 为假，等待
       // Since no_slowdown is false, wait here to be notified of the write
       // stall clearing
       {
@@ -254,8 +258,12 @@ bool WriteThread::LinkOne(Writer* w, std::atomic<Writer*>* newest_writer) {
       }
     }
     w->link_older = writers;
-    //该函数是用的无锁链表实现了链表里面的Add语意，同时由于第一个加入链表的线程
-    //newest_writer == nullptr所以有 return (writers == nullptr)的返回值。
+
+    // a.compare_exchange_weak(b,c)其中a是当前值，b期望值，c新值
+    // a==b时：函数返回真，并把c赋值给a
+    // a!=b时：函数返回假，并把a复制给b
+    // 该函数是用的无锁链表实现了链表里面的Add语意，同时由于第一个加入链表的线程
+    // newest_writer == nullptr所以有 return (writers == nullptr)的返回值。
     if (newest_writer->compare_exchange_weak(writers, w)) {
       return (writers == nullptr);
     }
