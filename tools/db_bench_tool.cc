@@ -88,6 +88,7 @@
 #include "utilities/merge_operators/bytesxor.h"
 #include "utilities/merge_operators/sortlist.h"
 #include "utilities/persistent_cache/block_cache_tier.h"
+#include "utilities/performance/my_log.h"
 
 #ifdef MEMKIND
 #include "memory/memkind_kmem_allocator.h"
@@ -4890,6 +4891,16 @@ class Benchmark {
 
     int64_t stage = 0;
     int64_t num_written = 0;
+
+    int64_t t_last_num = 0;
+    int64_t t_last_bytes = 0;
+    double t_start_time = Env::Default()->NowMicros();
+    double t_last_time = t_start_time;
+    double t_cur_time;
+#ifdef STATISTIC_OPEN
+    // global_stats.start_time = t_start_time;
+#endif
+
     while ((num_per_key_gen != 0) && !duration.Done(entries_per_batch_)) {
       if (duration.GetStage() != stage) {
         stage = duration.GetStage();
@@ -5161,6 +5172,32 @@ class Benchmark {
         fprintf(stderr, "put error: %s\n", s.ToString().c_str());
         ErrorExit();
       }
+#ifdef STATISTIC_OPEN
+      t_cur_time = Env::Default()->NowMicros();
+      if (t_cur_time - t_last_time > 10 * 1e6) {
+        double use_time = (t_cur_time - t_last_time) * 1e-6;
+        int64_t ebytes = bytes - t_last_bytes;
+        double now = (t_cur_time - t_start_time) * 1e-6;
+        int64_t written_num = num_written - t_last_num;
+
+        RECORD_INFO(
+            1,
+            "%.2f,%.2f,%.1f,%.1f,%.2f,%.1f \n",
+            now, (1.0 * ebytes / 1048576.0) / use_time,
+            1.0 * written_num / use_time, 1.0 * bytes / 1048576.0,
+            (1.0 * bytes / 1048576.0) / now, 1.0 * num_written / now);
+
+        t_last_time = t_cur_time;
+        t_last_bytes = bytes;
+        t_last_num = num_written;
+
+        std::string stats;
+        // db_with_cfh->db->GetProperty("rocksdb.levelstats", &stats);
+        db_with_cfh->db->GetProperty("rocksdb.stats", &stats);
+        RECORD_INFO(2, "now= %.2f s\n%s\n", now, stats.c_str());
+      }
+
+#endif
     }
     if ((write_mode == UNIQUE_RANDOM) && (p > 0.0)) {
       fprintf(stdout,
@@ -8064,6 +8101,7 @@ class Benchmark {
 };
 
 int db_bench_tool(int argc, char** argv) {
+  rocksdb::init_log_file();
   ROCKSDB_NAMESPACE::port::InstallStackTraceHandler();
   ConfigOptions config_options;
   static bool initialized = false;
@@ -8073,6 +8111,7 @@ int db_bench_tool(int argc, char** argv) {
     initialized = true;
   }
   ParseCommandLineFlags(&argc, &argv, true);
+  //! 对主要参数和环境的初始化
   FLAGS_compaction_style_e =
       (ROCKSDB_NAMESPACE::CompactionStyle)FLAGS_compaction_style;
 #ifndef ROCKSDB_LITE
@@ -8199,6 +8238,7 @@ int db_bench_tool(int argc, char** argv) {
     exit(1);
   }
 
+  //! 创建基准测试对象 Benchmark
   ROCKSDB_NAMESPACE::Benchmark benchmark;
   benchmark.Run();
 
