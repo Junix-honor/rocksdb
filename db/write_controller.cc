@@ -56,6 +56,7 @@ uint64_t WriteController::GetDelay(SystemClock* clock, uint64_t num_bytes) {
     return 0;
   }
 
+  // 无需延迟写入
   if (credit_in_bytes_ >= num_bytes) {
     credit_in_bytes_ -= num_bytes;
     return 0;
@@ -69,16 +70,22 @@ uint64_t WriteController::GetDelay(SystemClock* clock, uint64_t num_bytes) {
   const uint64_t kMicrosPerRefill = 1000;
 
   if (next_refill_time_ == 0) {
+    // 初次分配是为一个时间间隔的分配分配字节的初始值
     // Start with an initial allotment of bytes for one interval
     next_refill_time_ = time_now;
   }
+
+  //下次刷新时间已经过期
   if (next_refill_time_ <= time_now) {
     // Refill based on time interval plus any extra elapsed
     uint64_t elapsed = time_now - next_refill_time_ + kMicrosPerRefill;
+
+    //更新credit_in_bytes_
     credit_in_bytes_ += static_cast<uint64_t>(
         1.0 * elapsed / kMicrosPerSecond * delayed_write_rate_ + 0.999999);
     next_refill_time_ = time_now + kMicrosPerRefill;
 
+    //无需延迟写入
     if (credit_in_bytes_ >= num_bytes) {
       // Avoid delay if possible, to reduce DB mutex release & re-aquire.
       credit_in_bytes_ -= num_bytes;
@@ -86,6 +93,7 @@ uint64_t WriteController::GetDelay(SystemClock* clock, uint64_t num_bytes) {
     }
   }
 
+  //需要延迟写入
   // We need to delay to avoid exceeding write rate.
   assert(num_bytes > credit_in_bytes_);
   uint64_t bytes_over_budget = num_bytes - credit_in_bytes_;
