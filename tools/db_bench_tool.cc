@@ -1928,6 +1928,12 @@ struct DBWithColumnFamilies {
 #endif  // ROCKSDB_LITE
   std::atomic<size_t> num_created;  // Need to be updated after all the
                                     // new entries in cfh are set.
+
+  // 每次查询操作时要操作的列族数。在 DBWithColumnFamilies 结构体中，有一个名为
+  // GetCfh 的函数，它会根据随机数 rand_num
+  // 返回一个列族的句柄，此时会从最近创建的 num_hot
+  // 个列族中随机选择一个列族。因此 num_hot
+  // 决定了在每次查询操作时要涉及多少个列族，从而控制了查询操作的并发度。
   size_t num_hot;  // Number of column families to be queried at each moment.
                    // After each CreateNewCf(), another num_hot number of new
                    // Column families will be created and used to be queried.
@@ -2572,6 +2578,7 @@ struct ThreadState {
       : tid(index), rand((FLAGS_seed ? FLAGS_seed : 1000) + index) {}
 };
 
+//Duration：管理一段持续时间
 class Duration {
  public:
   Duration(uint64_t max_seconds, int64_t max_ops, int64_t ops_per_stage = 0) {
@@ -2582,29 +2589,37 @@ class Duration {
     start_at_ = FLAGS_env->NowMicros();
   }
 
+  //返回当前已经持续的阶段数量
   int64_t GetStage() { return std::min(ops_, max_ops_ - 1) / ops_per_stage_; }
 
+  //增加完成的操作数量，判断是否已经完成
   bool Done(int64_t increment) {
     if (increment <= 0) increment = 1;    // avoid Done(0) and infinite loops
     ops_ += increment;
 
     if (max_seconds_) {
+      //每1000个op检测是否已经超时
       // Recheck every appx 1000 ops (exact iff increment is factor of 1000)
       auto granularity = FLAGS_ops_between_duration_checks;
       if ((ops_ / granularity) != ((ops_ - increment) / granularity)) {
         uint64_t now = FLAGS_env->NowMicros();
+        //返回是否已经超时，如果已经超时则代表已经完成
         return ((now - start_at_) / 1000000) >= max_seconds_;
       } else {
         return false;
       }
     } else {
+      //如果op已经超量则代表已经完成
       return ops_ > max_ops_;
     }
   }
 
  private:
+  //最长持续时间
   uint64_t max_seconds_;
+  //最大操作数
   int64_t max_ops_;
+  //每个阶段执行的操作数
   int64_t ops_per_stage_;
   int64_t ops_;
   uint64_t start_at_;
@@ -3232,12 +3247,16 @@ class Benchmark {
     if (!SanityCheck()) {
       ErrorExit();
     }
+    //初始化option
     Open(&open_options_);
     PrintHeader(open_options_);
     std::stringstream benchmark_stream(FLAGS_benchmarks);
     std::string name;
     std::unique_ptr<ExpiredTimeFilter> filter;
+
+    // 从 -benchmark 中选出参数逐个执行
     while (std::getline(benchmark_stream, name, ',')) {
+      //!初始化变量
       // Sanitize parameters
       num_ = FLAGS_num;
       reads_ = (FLAGS_reads < 0 ? FLAGS_num : FLAGS_reads);
@@ -3265,6 +3284,8 @@ class Benchmark {
 
       int num_repeat = 1;
       int num_warmup = 0;
+
+      //! 根据name的参数设置num_repeat，num_warmup
       if (!name.empty() && *name.rbegin() == ']') {
         auto it = name.find('[');
         if (it == std::string::npos) {
@@ -3292,7 +3313,8 @@ class Benchmark {
           }
         }
       }
-
+      
+      //!根据name设置method
       // Both fillseqdeterministic and filluniquerandomdeterministic
       // fill the levels except the max level with UNIQUE_RANDOM
       // and fill the max level with fillseq and filluniquerandom, respectively
@@ -3523,7 +3545,7 @@ class Benchmark {
         fprintf(stderr, "unknown benchmark '%s'\n", name.c_str());
         ErrorExit();
       }
-
+      //! 根据需要重置db
       if (fresh_db) {
         if (FLAGS_use_existing_db) {
           fprintf(stdout, "%-12s : skipped (--use_existing_db is true)\n",
@@ -3546,7 +3568,8 @@ class Benchmark {
         }
         Open(&open_options_);  // use open_options for the last accessed
       }
-
+      
+      //! 运行method
       if (method != nullptr) {
         fprintf(stdout, "DB path: [%s]\n", FLAGS_db.c_str());
 
@@ -3616,6 +3639,8 @@ class Benchmark {
         }
 #endif  // ROCKSDB_LITE
 
+
+        //* 根据num_warmup、 num_repeat的次数，调用RunBenchmark()
         if (num_warmup > 0) {
           printf("Warming up benchmark by running %d times\n", num_warmup);
         }
@@ -3701,6 +3726,7 @@ class Benchmark {
     ThreadArg* arg = reinterpret_cast<ThreadArg*>(v);
     SharedState* shared = arg->shared;
     ThreadState* thread = arg->thread;
+    //!更新共享状态
     {
       MutexLock l(&shared->mu);
       shared->num_initialized++;
@@ -3712,12 +3738,15 @@ class Benchmark {
       }
     }
 
+    //!初始化性能检测
     SetPerfLevel(static_cast<PerfLevel> (shared->perf_level));
     perf_context.EnablePerLevelPerfContext();
     thread->stats.Start(thread->tid);
+    //!执行method
     (arg->bm->*(arg->method))(thread);
     thread->stats.Stop();
 
+    //! 更新共享状态
     {
       MutexLock l(&shared->mu);
       shared->num_done++;
@@ -3729,6 +3758,7 @@ class Benchmark {
 
   Stats RunBenchmark(int n, Slice name,
                      void (Benchmark::*method)(ThreadState*)) {
+    //线程共享状态
     SharedState shared;
     shared.total = n;
     shared.num_initialized = 0;
@@ -3743,15 +3773,18 @@ class Benchmark {
           FLAGS_benchmark_read_rate_limit, 100000 /* refill_period_us */,
           10 /* fairness */, RateLimiter::Mode::kReadsOnly));
     }
-
+    
+    //report agent
     std::unique_ptr<ReporterAgent> reporter_agent;
     if (FLAGS_report_interval_seconds > 0) {
       reporter_agent.reset(new ReporterAgent(FLAGS_env, FLAGS_report_file,
                                              FLAGS_report_interval_seconds));
     }
 
+    //线程参数
     ThreadArg* arg = new ThreadArg[n];
 
+    //!依次设置线程参数并运行线程 
     for (int i = 0; i < n; i++) {
 #ifdef NUMA
       if (FLAGS_enable_numa) {
@@ -3773,12 +3806,15 @@ class Benchmark {
       arg[i].bm = this;
       arg[i].method = method;
       arg[i].shared = &shared;
+      //线程状态
       arg[i].thread = new ThreadState(i);
       arg[i].thread->stats.SetReporterAgent(reporter_agent.get());
       arg[i].thread->shared = &shared;
+      //运行线程
       FLAGS_env->StartThread(ThreadBody, &arg[i]);
     }
 
+    //!线程同步
     shared.mu.Lock();
     while (shared.num_initialized < n) {
       shared.cv.Wait();
@@ -4470,6 +4506,7 @@ class Benchmark {
 
     options.listeners.emplace_back(listener_);
 
+    //! 打开DB
     if (FLAGS_num_multi_db <= 1) {
       OpenDb(options, FLAGS_db, &db_);
     } else {
@@ -4507,9 +4544,10 @@ class Benchmark {
 
   void Open(Options* opts) {
     if (!InitializeOptionsFromFile(opts)) {
+      // 通过 FLAGS_xxx 初始化 options 中的相关字段
       InitializeOptionsFromFlags(opts);
     }
-
+    // 初始化option，并打开DB
     InitializeOptionsGeneral(opts);
   }
 
@@ -4761,23 +4799,31 @@ class Benchmark {
   }
 
   void DoWrite(ThreadState* thread, WriteMode write_mode) {
+    //! 初始化
     const int test_duration = write_mode == RANDOM ? FLAGS_duration : 0;
+    // 实际执行的写操作数量，除非指定 -writes=0，那么它就等于 writes_
     const int64_t num_ops = writes_ == 0 ? num_ : writes_;
 
+    //确定key生成器数量
     size_t num_key_gens = 1;
     if (db_.db == nullptr) {
       num_key_gens = multi_dbs_.size();
     }
     std::vector<std::unique_ptr<KeyGenerator>> key_gens(num_key_gens);
+    //最大的操作次数
     int64_t max_ops = num_ops * num_key_gens;
+    //每一个阶段的操作次数，默认只有一个阶段
     int64_t ops_per_stage = max_ops;
+    //如果设置了column_families相关参数，则会存在多个阶段
     if (FLAGS_num_column_families > 1 && FLAGS_num_hot_column_families > 0) {
       ops_per_stage = (max_ops - 1) / (FLAGS_num_column_families /
                                        FLAGS_num_hot_column_families) +
                       1;
     }
-
+    
+    //初始化duration类
     Duration duration(test_duration, max_ops, ops_per_stage);
+    //初始化key生成器
     const uint64_t num_per_key_gen = num_ + max_num_range_tombstones_;
     for (size_t i = 0; i < num_key_gens; i++) {
       key_gens[i].reset(new KeyGenerator(&(thread->rand), write_mode,
@@ -4790,12 +4836,14 @@ class Benchmark {
       thread->stats.AddMessage(msg);
     }
 
+    //value生成器
     RandomGenerator gen;
     WriteBatch batch(/*reserved_bytes=*/0, /*max_bytes=*/0,
                      user_timestamp_size_);
     Status s;
     int64_t bytes = 0;
 
+    //给key分配空间
     std::unique_ptr<const char[]> key_guard;
     Slice key = AllocateKey(&key_guard);
     std::unique_ptr<const char[]> begin_key_guard;
@@ -4804,6 +4852,8 @@ class Benchmark {
     Slice end_key = AllocateKey(&end_key_guard);
     double p = 0.0;
     uint64_t num_overwrites = 0, num_unique_keys = 0, num_selective_deletes = 0;
+    
+    //* pass:overwrite相关
     // If user set overwrite_probability flag,
     // check if value is in [0.0,1.0].
     if (FLAGS_overwrite_probability > 0.0) {
@@ -4832,6 +4882,7 @@ class Benchmark {
     std::deque<int64_t> inserted_key_window;
     Random64 reservoir_id_gen(FLAGS_seed);
 
+    //* pass:variables used in disposable/persistent keys simulation
     // --- Variables used in disposable/persistent keys simulation:
     // The following variables are used when
     // disposable_entries_batch_size is >0. We simualte a workload
@@ -4889,6 +4940,7 @@ class Benchmark {
       ts_guard.reset(new char[user_timestamp_size_]);
     }
 
+    //循环变量的初始化
     int64_t stage = 0;
     int64_t num_written = 0;
 
@@ -4901,6 +4953,7 @@ class Benchmark {
     // global_stats.start_time = t_start_time;
 #endif
 
+    //! 开始循环
     while ((num_per_key_gen != 0) && !duration.Done(entries_per_batch_)) {
       if (duration.GetStage() != stage) {
         stage = duration.GetStage();
@@ -4913,11 +4966,13 @@ class Benchmark {
         }
       }
 
+      //确定操作哪一个db，哪一个key_gen
       size_t id = thread->rand.Next() % num_key_gens;
       DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(id);
       batch.Clear();
       int64_t batch_bytes = 0;
 
+      //循环填满一个batch
       for (int64_t j = 0; j < entries_per_batch_; j++) {
         int64_t rand_num = 0;
         if ((write_mode == UNIQUE_RANDOM) && (p > 0.0)) {
@@ -5018,8 +5073,10 @@ class Benchmark {
             }
           }
         } else {
+          // 生成一个key_num
           rand_num = key_gens[id]->Next();
         }
+        // 用key_num生成key
         GenerateKeyFromInt(rand_num, FLAGS_num, &key);
         Slice val;
         if (kNumDispAndPersEntries > 0) {
@@ -5029,8 +5086,11 @@ class Benchmark {
           val = Slice(random_value);
           num_unique_keys++;
         } else {
+          //生成value
           val = gen.Generate();
         }
+
+        // 将生成的key-value插入batch
         if (use_blob_db_) {
 #ifndef ROCKSDB_LITE
           // Stacked BlobDB
@@ -5052,6 +5112,7 @@ class Benchmark {
           batch.Put(db_with_cfh->GetCfh(rand_num), key,
                     val);
         }
+        // 更新统计数据
         batch_bytes += val.size() + key_size_ + user_timestamp_size_;
         bytes += val.size() + key_size_ + user_timestamp_size_;
         ++num_written;
@@ -5210,6 +5271,7 @@ class Benchmark {
               ".\nNumber of 'disposable entry delete': %" PRIu64 "\n",
               num_written, num_selective_deletes);
     }
+    // 更新统计数据
     thread->stats.AddBytes(bytes);
   }
 
@@ -8110,8 +8172,9 @@ int db_bench_tool(int argc, char** argv) {
                     " [OPTIONS]...");
     initialized = true;
   }
+  //! 首先由 ParseCommandLineFlags() 进行初步解析，相应参数放入对应的 FLAGS_xxx
   ParseCommandLineFlags(&argc, &argv, true);
-  //! 对主要参数和环境的初始化
+  //! 根据参数设置一些全局变量
   FLAGS_compaction_style_e =
       (ROCKSDB_NAMESPACE::CompactionStyle)FLAGS_compaction_style;
 #ifndef ROCKSDB_LITE
