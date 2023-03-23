@@ -478,6 +478,7 @@ void ThreadPoolImpl::SubmitJob(std::function<void()>&& job) {
 
 void ThreadPoolImpl::Schedule(void(*function)(void* arg1), void* arg,
   void* tag, void(*unschedFunction)(void* arg)) {
+  // 将线程函数、参数、线程回收函数封装，添加到待调度队列queue_
   if (unschedFunction == nullptr) {
     impl_->Submit(std::bind(function, arg), std::function<void()>(), tag);
   } else {

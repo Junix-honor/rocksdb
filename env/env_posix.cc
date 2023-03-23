@@ -505,7 +505,7 @@ Env* Env::Default() {
   CompressionContextCache::InitSingleton();
   INIT_SYNC_POINT_SINGLETONS();
   // ~PosixEnv must be called on exit
-  static PosixEnv default_env;
+  static PosixEnv default_env;  // 创建posix env
   return &default_env;
 }
 
