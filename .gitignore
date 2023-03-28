@@ -97,3 +97,5 @@ fuzz/crash-*
 cmake-build-*
 
 leveldb/*
+release/
+build/
