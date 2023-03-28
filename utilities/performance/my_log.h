@@ -34,9 +34,9 @@ namespace rocksdb {
 #define RECORD_LOG(format,...)
 #endif
 
-const std::string log_file0(".//perf_log//LOG");
-const std::string log_file1(".//perf_log//OP_TIME.csv");
-const std::string log_file2(".//perf_log//OP_DATA");
+const std::string log_file0("./LOG");
+const std::string log_file1("./OP_TIME.csv");
+const std::string log_file2("./OP_DATA");
 // const std::string log_file3("compaction.csv");
 // const std::string log_file4("Latency.csv");
 // const std::string log_file5("PerSecondLatency.csv");

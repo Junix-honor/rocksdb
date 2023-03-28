@@ -5233,9 +5233,10 @@ class Benchmark {
         fprintf(stderr, "put error: %s\n", s.ToString().c_str());
         ErrorExit();
       }
+// iops bw 统计
 #ifdef STATISTIC_OPEN
       t_cur_time = Env::Default()->NowMicros();
-      if (t_cur_time - t_last_time > 10 * 1e6) {
+      if (t_cur_time - t_last_time > 1 * 1e6) {
         double use_time = (t_cur_time - t_last_time) * 1e-6;
         int64_t ebytes = bytes - t_last_bytes;
         double now = (t_cur_time - t_start_time) * 1e-6;
