@@ -39,6 +39,7 @@
 #include "util/autovector.h"
 #include "util/cast_util.h"
 #include "util/compression.h"
+#include "utilities/performance/my_log.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -616,6 +617,10 @@ ColumnFamilyData::ColumnFamilyData(
 
 // DB mutex held
 ColumnFamilyData::~ColumnFamilyData() {
+  double now = (ioptions_.env->NowMicros() - bench_start_time) * 1e-6;
+  if (write_controller_token_) {
+    RECORD_INFO(3, "%.2f \n", now);
+  }
   assert(refs_.load(std::memory_order_relaxed) == 0);
   // remove from linked list
   //从双向链表中删除对应的数据
@@ -893,6 +898,12 @@ WriteStallCondition ColumnFamilyData::RecalculateWriteStallConditions(
     bool was_stopped = write_controller->IsStopped();
     bool needed_delay = write_controller->NeedsDelay();
 
+    double now = (ioptions_.env->NowMicros() - bench_start_time) * 1e-6;
+
+    if (write_controller_token_) {
+      RECORD_INFO(3, "%.2f \n", now);
+    }
+
     if (write_stall_condition == WriteStallCondition::kStopped &&
         write_stall_cause == WriteStallCause::kMemtableLimit) {
       write_controller_token_ = write_controller->GetStopToken();
@@ -903,6 +914,7 @@ WriteStallCondition ColumnFamilyData::RecalculateWriteStallConditions(
           "(waiting for flush), max_write_buffer_number is set to %d",
           name_.c_str(), imm()->NumNotFlushed(),
           mutable_cf_options.max_write_buffer_number);
+      RECORD_INFO(3, "kStopped,kMemtableLimit,%.2f,",now);
     } else if (write_stall_condition == WriteStallCondition::kStopped &&
                write_stall_cause == WriteStallCause::kL0FileCountLimit) {
       write_controller_token_ = write_controller->GetStopToken();
@@ -914,6 +926,7 @@ WriteStallCondition ColumnFamilyData::RecalculateWriteStallConditions(
       ROCKS_LOG_WARN(ioptions_.logger,
                      "[%s] Stopping writes because we have %d level-0 files",
                      name_.c_str(), vstorage->l0_delay_trigger_count());
+      RECORD_INFO(3, "kStopped,kL0FileCountLimit,%.2f,",now);
     } else if (write_stall_condition == WriteStallCondition::kStopped &&
                write_stall_cause == WriteStallCause::kPendingCompactionBytes) {
       write_controller_token_ = write_controller->GetStopToken();
@@ -924,6 +937,7 @@ WriteStallCondition ColumnFamilyData::RecalculateWriteStallConditions(
           "[%s] Stopping writes because of estimated pending compaction "
           "bytes %" PRIu64,
           name_.c_str(), compaction_needed_bytes);
+      RECORD_INFO(3, "kStopped,kPendingCompactionBytes,%.2f,",now);
     } else if (write_stall_condition == WriteStallCondition::kDelayed &&
                write_stall_cause == WriteStallCause::kMemtableLimit) {
       write_controller_token_ =
@@ -939,6 +953,7 @@ WriteStallCondition ColumnFamilyData::RecalculateWriteStallConditions(
           name_.c_str(), imm()->NumNotFlushed(),
           mutable_cf_options.max_write_buffer_number,
           write_controller->delayed_write_rate());
+      RECORD_INFO(3, "kDelayed,kMemtableLimit,%.2f,",now);
     } else if (write_stall_condition == WriteStallCondition::kDelayed &&
                write_stall_cause == WriteStallCause::kL0FileCountLimit) {
       // L0 is the last two files from stopping.
@@ -959,6 +974,7 @@ WriteStallCondition ColumnFamilyData::RecalculateWriteStallConditions(
                      "rate %" PRIu64,
                      name_.c_str(), vstorage->l0_delay_trigger_count(),
                      write_controller->delayed_write_rate());
+      RECORD_INFO(3, "kDelayed,kL0FileCountLimit,%.2f,",now);
     } else if (write_stall_condition == WriteStallCondition::kDelayed &&
                write_stall_cause == WriteStallCause::kPendingCompactionBytes) {
       // If the distance to hard limit is less than 1/4 of the gap between soft
@@ -984,6 +1000,7 @@ WriteStallCondition ColumnFamilyData::RecalculateWriteStallConditions(
           "bytes %" PRIu64 " rate %" PRIu64,
           name_.c_str(), vstorage->estimated_compaction_needed_bytes(),
           write_controller->delayed_write_rate());
+      RECORD_INFO(3, "kDelayed,kPendingCompactionBytes,%.2f,",now);
     } else {
       assert(write_stall_condition == WriteStallCondition::kNormal);
       if (vstorage->l0_delay_trigger_count() >=
@@ -997,6 +1014,8 @@ WriteStallCondition ColumnFamilyData::RecalculateWriteStallConditions(
             "[%s] Increasing compaction threads because we have %d level-0 "
             "files ",
             name_.c_str(), vstorage->l0_delay_trigger_count());
+        RECORD_INFO(3, "IncreasingCompactionThreads,kL0FileCountLimit,%.2f,",
+                    now);
       } else if (vstorage->estimated_compaction_needed_bytes() >=
                  mutable_cf_options.soft_pending_compaction_bytes_limit / 4) {
         // Increase compaction threads if bytes needed for compaction exceeds
@@ -1012,6 +1031,9 @@ WriteStallCondition ColumnFamilyData::RecalculateWriteStallConditions(
               "compaction "
               "bytes %" PRIu64,
               name_.c_str(), vstorage->estimated_compaction_needed_bytes());
+          RECORD_INFO(
+              3, "IncreasingCompactionThreads,kPendingCompactionBytes,%.2f,",
+              now);
         }
       } else {
         write_controller_token_.reset();

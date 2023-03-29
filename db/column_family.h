@@ -26,6 +26,7 @@
 #include "rocksdb/options.h"
 #include "trace_replay/block_cache_tracer.h"
 #include "util/thread_local.h"
+#include "utilities/performance/my_log.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -641,6 +642,7 @@ class ColumnFamilyData {
 // * GetColumnFamily() -- either inside of DB mutex or from a write thread
 // * GetNextColumnFamilyID(), GetMaxColumnFamily(), UpdateMaxColumnFamily(),
 // NumberOfColumnFamilies -- inside of DB mutex
+// 所有的Column Family都是通过一个叫做ColumnFamilySet的结构来管理的
 class ColumnFamilySet {
  public:
   // ColumnFamilySet supports iteration

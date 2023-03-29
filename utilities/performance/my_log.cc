@@ -1,6 +1,8 @@
 #include "my_log.h"
-namespace rocksdb {
+
+uint64_t bench_start_time;
 void init_log_file() {
+  bench_start_time = 0;
   FILE* fp;
 #ifdef LZW_INFO
   fp = fopen(log_file1.c_str(), "w");
@@ -12,14 +14,15 @@ void init_log_file() {
   if (fp == nullptr) printf("log failed\n");
   fclose(fp);
 
-  // fp = fopen(log_file3.c_str(), "w");
-  // if(fp == nullptr) printf("log failed\n");
-  // fclose(fp);
-  // RECORD_INFO(3,"compaction,read(MB),write(MB),time(s),start(s),is_level0\n");
+  fp = fopen(log_file3.c_str(), "w");
+  if(fp == nullptr) printf("log failed\n");
+  fclose(fp);
+  RECORD_INFO(3,"type,cause,start(s),end(s)\n");
 
-  // fp = fopen(log_file4.c_str(), "w");
-  // if(fp == nullptr) printf("log failed\n");
-  // fclose(fp);
+  fp = fopen(log_file4.c_str(), "w");
+  if(fp == nullptr) printf("log failed\n");
+  fclose(fp);
+  RECORD_INFO(4, "type,start(s),end(s)\n");
 
   // fp = fopen(log_file5.c_str(), "w");
   // if(fp == nullptr) printf("log failed\n");
@@ -56,8 +59,8 @@ void LZW_LOG(int file_num, const char* format, ...) {
     case 2:
       log_file = &log_file2;
       break;
-    // case 3:
-    //   log_file = &log_file3;
+    case 3:
+      log_file = &log_file3;
     //   break;
     // case 4:
     //   log_file = &log_file4;
@@ -74,5 +77,3 @@ void LZW_LOG(int file_num, const char* format, ...) {
   fprintf(fp, "%s", buf);
   fclose(fp);
 }
-
-}  // namespace rocksdb

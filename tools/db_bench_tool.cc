@@ -4950,7 +4950,7 @@ class Benchmark {
     double t_last_time = t_start_time;
     double t_cur_time;
 #ifdef STATISTIC_OPEN
-    // global_stats.start_time = t_start_time;
+    bench_start_time = t_start_time;
 #endif
 
     //! 开始循环
@@ -8164,7 +8164,10 @@ class Benchmark {
 };
 
 int db_bench_tool(int argc, char** argv) {
-  rocksdb::init_log_file();
+
+#ifdef STATISTIC_OPEN
+  init_log_file();
+#endif
   ROCKSDB_NAMESPACE::port::InstallStackTraceHandler();
   ConfigOptions config_options;
   static bool initialized = false;

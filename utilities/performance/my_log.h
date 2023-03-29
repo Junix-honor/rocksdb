@@ -4,11 +4,9 @@
 
 #pragma once
 
-
 #include <string>
 #include <stdarg.h>
 #define STATISTIC_OPEN
-namespace rocksdb {
 
 #define LZW_INFO
 #ifdef LZW_INFO
@@ -34,19 +32,15 @@ namespace rocksdb {
 #define RECORD_LOG(format,...)
 #endif
 
-const std::string log_file0("./LOG");
-const std::string log_file1("./OP_TIME.csv");
-const std::string log_file2("./OP_DATA");
-// const std::string log_file3("compaction.csv");
-// const std::string log_file4("Latency.csv");
+const std::string log_file0("./exp_log");
+const std::string log_file1("./exp_op_time.csv");
+const std::string log_file2("./exp_op_data");
+const std::string log_file3("./exp_stall.csv");
+// const std::string log_file4("./exp_foreground_stall.csv");
 // const std::string log_file5("PerSecondLatency.csv");
 
 
 extern void init_log_file();
 
 extern void LZW_LOG(int file_num,const char* format, ...);
-
-
-}
-
-
+extern uint64_t bench_start_time;

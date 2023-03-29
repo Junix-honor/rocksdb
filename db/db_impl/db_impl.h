@@ -65,6 +65,7 @@
 #include "util/repeatable_thread.h"
 #include "util/stop_watch.h"
 #include "util/thread_local.h"
+#include "utilities/performance/my_log.h"
 
 namespace ROCKSDB_NAMESPACE {
 
