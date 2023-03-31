@@ -90,7 +90,6 @@ buckifier/__pycache__
 compile_commands.json
 clang-format-diff.py
 .py3/
-result_*/
 fuzz/proto/gen/
 fuzz/crash-*
 
@@ -99,3 +98,5 @@ cmake-build-*
 leveldb/*
 release/
 build/
+result_*/
+rocksdb_result_*/

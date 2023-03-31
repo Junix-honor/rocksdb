@@ -8,7 +8,7 @@ void init_log_file() {
   fp = fopen(log_file1.c_str(), "w");
   if (fp == nullptr) printf("log failed\n");
   fclose(fp);
-  RECORD_INFO(1, "now,bw,iops,size,average bw,average iops\n");
+  RECORD_INFO(1, "unix_time,now,bw,iops,size,average bw,average iops\n");
 
   fp = fopen(log_file2.c_str(), "w");
   if (fp == nullptr) printf("log failed\n");
@@ -17,12 +17,12 @@ void init_log_file() {
   fp = fopen(log_file3.c_str(), "w");
   if(fp == nullptr) printf("log failed\n");
   fclose(fp);
-  RECORD_INFO(3,"type,cause,start(s),end(s)\n");
+  RECORD_INFO(3,"type,cause,start,end\n");
 
-  fp = fopen(log_file4.c_str(), "w");
-  if(fp == nullptr) printf("log failed\n");
-  fclose(fp);
-  RECORD_INFO(4, "type,start(s),end(s)\n");
+  // fp = fopen(log_file4.c_str(), "w");
+  // if(fp == nullptr) printf("log failed\n");
+  // fclose(fp);
+  // RECORD_INFO(4, "type,start(s),end(s)\n");
 
   // fp = fopen(log_file5.c_str(), "w");
   // if(fp == nullptr) printf("log failed\n");
@@ -61,7 +61,7 @@ void LZW_LOG(int file_num, const char* format, ...) {
       break;
     case 3:
       log_file = &log_file3;
-    //   break;
+      break;
     // case 4:
     //   log_file = &log_file4;
     //   break;

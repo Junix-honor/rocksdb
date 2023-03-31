@@ -4949,6 +4949,7 @@ class Benchmark {
     double t_start_time = Env::Default()->NowMicros();
     double t_last_time = t_start_time;
     double t_cur_time;
+    int64_t t_unix_time;
 #ifdef STATISTIC_OPEN
     bench_start_time = t_start_time;
 #endif
@@ -5236,18 +5237,17 @@ class Benchmark {
 // iops bw 统计
 #ifdef STATISTIC_OPEN
       t_cur_time = Env::Default()->NowMicros();
+      Env::Default()->GetCurrentTime(&t_unix_time);
       if (t_cur_time - t_last_time > 1 * 1e6) {
         double use_time = (t_cur_time - t_last_time) * 1e-6;
         int64_t ebytes = bytes - t_last_bytes;
         double now = (t_cur_time - t_start_time) * 1e-6;
         int64_t written_num = num_written - t_last_num;
 
-        RECORD_INFO(
-            1,
-            "%.2f,%.2f,%.1f,%.1f,%.2f,%.1f \n",
-            now, (1.0 * ebytes / 1048576.0) / use_time,
-            1.0 * written_num / use_time, 1.0 * bytes / 1048576.0,
-            (1.0 * bytes / 1048576.0) / now, 1.0 * num_written / now);
+        RECORD_INFO(1, "%" PRId64 ",%.2f,%.2f,%.1f,%.1f,%.2f,%.1f \n",
+                    t_unix_time, now, (1.0 * ebytes / 1048576.0) / use_time,
+                    1.0 * written_num / use_time, 1.0 * bytes / 1048576.0,
+                    (1.0 * bytes / 1048576.0) / now, 1.0 * num_written / now);
 
         t_last_time = t_cur_time;
         t_last_bytes = bytes;
