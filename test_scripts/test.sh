@@ -9,9 +9,9 @@ export LC_ALL=C
 sudo -S bash -c 'echo 800000 > /proc/sys/fs/file-max'
 ulimit -n 800000
 
-op_num=10000000
+op_num=1500000000
 user_thread_num=1
-backgroud_thread_num=2
+backgroud_thread_num=6
 num_multi_db=0
 value_size=100
 write_buffer_size=64
@@ -47,8 +47,8 @@ iostat -mtx ${monitor_interval} > exp_iostat_raw.txt &
 # iostat -mtx ${monitor_interval} | grep -e ${db_disk} -e ${wal_disk} > exp_iostat.txt &
 iostat_pid=$!
 
-# pidstat -p ${db_bench_pid} -u -t 1 > exp_pidstat.txt&
-pidstat -p ${db_bench_pid} -dRsuvr -H -t 1 > exp_pidstat.txt&
+pidstat -p ${db_bench_pid} -d -t 1 > exp_pidstat_raw.txt&
+# pidstat -p ${db_bench_pid} -dRsuvr -H -t 1 > exp_pidstat.txt&
 pidstat_pid=$!
 
 # fg $(jobs | grep "db_bench" | awk '{print $1}')
@@ -63,6 +63,8 @@ grep -e 'db_bench' -e 'kv_bench' -e 'rocksdb:' exp_top_raw.txt > exp_top.txt
 grep -E '^top' exp_top_raw.txt | awk '{print $3}' >exp_top_time.txt
 grep -e ${db_disk} -e ${wal_disk} exp_iostat_raw.txt > exp_iostat.txt 
 grep '^[0-9][0-9]/[0-9][0-9]/[0-9][0-9]' exp_iostat_raw.txt | cut -d ' ' -f 2 >exp_iostat_time.txt
+grep -e '|__' exp_pidstat_raw.txt > exp_pidstat.txt
+
 
 
 result_dir=rocksdb_result_${op_num}_${write_buffer_size}M_${user_thread_num}user_${backgroud_thread_num}bg_${num_multi_db}mutidb
