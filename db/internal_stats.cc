@@ -216,9 +216,10 @@ void PrintLevelStats(char* buf, size_t len, const std::string& name,
                     score, w_amp, stats);
   PrintLevelStats(buf, len, name, level_stats);
 }
-
-// Assumes that trailing numbers represent an optional argument. This requires
-// property names to not end with numbers.
+// 假定结尾的数字表示一个可选参数，因此属性名称不能以数字结尾。
+// 函数 GetPropertyNameAndArg 的目的是从输入参数 property 中获取名称和参数值。
+//  Assumes that trailing numbers represent an optional argument. This requires
+//  property names to not end with numbers.
 std::pair<Slice, Slice> GetPropertyNameAndArg(const Slice& property) {
   Slice name = property, arg = property;
   size_t sfx_len = 0;

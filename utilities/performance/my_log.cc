@@ -19,10 +19,12 @@ void init_log_file() {
   fclose(fp);
   RECORD_INFO(3,"type,cause,start,end\n");
 
-  // fp = fopen(log_file4.c_str(), "w");
-  // if(fp == nullptr) printf("log failed\n");
-  // fclose(fp);
-  // RECORD_INFO(4, "type,start(s),end(s)\n");
+  fp = fopen(log_file4.c_str(), "w");
+  if(fp == nullptr) printf("log failed\n");
+  fclose(fp);
+  RECORD_INFO(4,
+              "time,num_unflushed_memtables,num_l0_files,num_compaction_needed_"
+              "bytes\n");
 
   // fp = fopen(log_file5.c_str(), "w");
   // if(fp == nullptr) printf("log failed\n");
@@ -62,9 +64,9 @@ void LZW_LOG(int file_num, const char* format, ...) {
     case 3:
       log_file = &log_file3;
       break;
-    // case 4:
-    //   log_file = &log_file4;
-    //   break;
+    case 4:
+      log_file = &log_file4;
+      break;
     // case 5:
     //   log_file = &log_file5;
     //   break;

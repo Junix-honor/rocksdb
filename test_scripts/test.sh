@@ -9,9 +9,9 @@ export LC_ALL=C
 sudo -S bash -c 'echo 800000 > /proc/sys/fs/file-max'
 ulimit -n 800000
 
-op_num=1500000000
+op_num=100000000
 user_thread_num=1
-backgroud_thread_num=6
+backgroud_thread_num=2
 num_multi_db=0
 value_size=100
 write_buffer_size=64

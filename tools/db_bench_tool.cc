@@ -5199,6 +5199,7 @@ class Benchmark {
           ErrorExit();
         }
       }
+      //将batch写入DB
       if (!use_blob_db_) {
         // Not stacked BlobDB
         s = db_with_cfh->db->Write(write_options_, &batch);
@@ -5236,29 +5237,55 @@ class Benchmark {
       }
 // iops bw 统计
 #ifdef STATISTIC_OPEN
-      t_cur_time = Env::Default()->NowMicros();
-      Env::Default()->GetCurrentTime(&t_unix_time);
-      if (t_cur_time - t_last_time > 1 * 1e6) {
-        double use_time = (t_cur_time - t_last_time) * 1e-6;
-        int64_t ebytes = bytes - t_last_bytes;
-        double now = (t_cur_time - t_start_time) * 1e-6;
-        int64_t written_num = num_written - t_last_num;
+      if (db_.db != nullptr) {
+        t_cur_time = Env::Default()->NowMicros();
+        Env::Default()->GetCurrentTime(&t_unix_time);
+        if (t_cur_time - t_last_time > 1 * 1e6) {
+          double use_time = (t_cur_time - t_last_time) * 1e-6;
+          int64_t ebytes = bytes - t_last_bytes;
+          double now = (t_cur_time - t_start_time) * 1e-6;
+          int64_t written_num = num_written - t_last_num;
 
-        RECORD_INFO(1, "%" PRId64 ",%.2f,%.2f,%.1f,%.1f,%.2f,%.1f \n",
-                    t_unix_time, now, (1.0 * ebytes / 1048576.0) / use_time,
-                    1.0 * written_num / use_time, 1.0 * bytes / 1048576.0,
-                    (1.0 * bytes / 1048576.0) / now, 1.0 * num_written / now);
+          RECORD_INFO(1, "%" PRId64 ",%.2f,%.2f,%.1f,%.1f,%.2f,%.1f \n",
+                      t_unix_time, now, (1.0 * ebytes / 1048576.0) / use_time,
+                      1.0 * written_num / use_time, 1.0 * bytes / 1048576.0,
+                      (1.0 * bytes / 1048576.0) / now, 1.0 * num_written / now);
 
-        t_last_time = t_cur_time;
-        t_last_bytes = bytes;
-        t_last_num = num_written;
+          t_last_time = t_cur_time;
+          t_last_bytes = bytes;
+          t_last_num = num_written;
 
-        std::string stats;
-        // db_with_cfh->db->GetProperty("rocksdb.levelstats", &stats);
-        db_with_cfh->db->GetProperty("rocksdb.stats", &stats);
-        RECORD_INFO(2, "now= %.2f s\n%s\n", now, stats.c_str());
+          std::string stats;
+          // db_with_cfh->db->GetProperty("rocksdb.levelstats", &stats);
+          db_with_cfh->db->GetProperty("rocksdb.stats", &stats);
+          RECORD_INFO(2, "now= %.2f s\n%s\n", now, stats.c_str());
+
+          std::string num_unflushed_memtables;
+          std::string num_l0_files;
+          std::string num_compaction_needed_bytes;
+          if (!db_with_cfh->db->GetProperty("rocksdb.num-immutable-mem-table",
+                                            &num_unflushed_memtables)) {
+            num_unflushed_memtables = "(failed)";
+          }
+          if (!db_with_cfh->db->GetProperty("rocksdb.num-files-at-level0",
+                                            &num_l0_files)) {
+            num_l0_files = "(failed)";
+          }
+          if (!db_with_cfh->db->GetProperty(
+                  "rocksdb.estimate-pending-compaction-bytes",
+                  &num_compaction_needed_bytes)) {
+            num_compaction_needed_bytes = "(failed)";
+          }
+          RECORD_INFO(4, "%.2f,%s,%s,%s\n", now,
+                      num_unflushed_memtables.c_str(), num_l0_files.c_str(),
+                      num_compaction_needed_bytes.c_str());
+        }
       }
-
+      // else{
+      //   for (const auto& db_with_cfh : multi_dbs_) {
+      //     PrintStats(db_with_cfh.db, key, true);
+      //   }
+      // }
 #endif
     }
     if ((write_mode == UNIQUE_RANDOM) && (p > 0.0)) {
