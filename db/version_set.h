@@ -536,6 +536,7 @@ class VersionStorageInfo {
   int num_non_empty_levels_;  // Number of levels. Any level larger than it
                               // is guaranteed to be empty.
   // Per-level max bytes
+  // 在VersionStorageInfo::CalculateBaseBytes 这个函数中被初始化
   std::vector<uint64_t> level_max_bytes_;
 
   // A short brief metadata of files per level
@@ -622,9 +623,9 @@ class VersionStorageInfo {
   // are initialized by Finalize().
   // The most critical level to be compacted is listed first
   // These are used to pick the best compaction level
-  // 这两个变量分别保存了level以及每个level所对应的score(这里score越高
-  // 表示compact优先级越高)，而score小于１则表示不需要compact.
-  // 这两个vector是在VersionStorageInfo::ComputeCompactionScore中被更新
+  // what：这两个变量分别保存了level以及每个level所对应的score
+  // (这里score越高表示compact优先级越高)，而score小于１则表示不需要compact.
+  // when：这两个vector是在VersionStorageInfo::ComputeCompactionScore中被更新
   std::vector<double> compaction_score_;
   std::vector<int> compaction_level_;
   int l0_delay_trigger_count_ = 0;  // Count used to trigger slow down and stop

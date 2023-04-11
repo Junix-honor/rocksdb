@@ -2593,6 +2593,7 @@ void DBImpl::SchedulePendingFlush(const FlushRequest& flush_req,
 
 void DBImpl::SchedulePendingCompaction(ColumnFamilyData* cfd) {
   mutex_.AssertHeld();
+  // 核心函数是NeedsCompaction,通过这个函数来判断是否有sst需要被compact
   if (!cfd->queued_for_compaction() && cfd->NeedsCompaction()) {
     AddToCompactionQueue(cfd);
     ++unscheduled_compactions_;
@@ -3069,6 +3070,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
   // InternalKey* manual_end = &manual_end_storage;
   bool sfm_reserved_compact_space = false;
   if (is_manual) {
+    //* manual Compaction
     ManualCompactionState* m = manual_compaction;
     assert(m->in_progress);
     if (!c) {
@@ -3107,6 +3109,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
       }
     }
   } else if (!is_prepicked && !compaction_queue_.empty()) {
+    //* 正常Compaction
     if (HasExclusiveManualCompaction()) {
       // Can't compact right now, but try again later
       TEST_SYNC_POINT("DBImpl::BackgroundCompaction()::Conflict");
@@ -3116,7 +3119,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
 
       return Status::OK();
     }
-
+    //!首先是从compaction_queue_队列中读取第一个需要compact的column family.
     auto cfd = PickCompactionFromQueue(&task_token, log_buffer);
     if (cfd == nullptr) {
       // Can't find any executable task from the compaction queue.
@@ -3147,6 +3150,8 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
       // compaction is not necessary. Need to make sure mutex is held
       // until we make a copy in the following code
       TEST_SYNC_POINT("DBImpl::BackgroundCompaction():BeforePickCompaction");
+      //! 没有禁止自动compaction的时候，接下来通过PickCompaction选取当前CF中所需要compact的内容.
+      // 这个函数会根据设置的不同的Compact策略调用不同的方法，这里我们只看默认的LevelCompact的对应函数.
       c.reset(cfd->PickCompaction(*mutable_cf_options, mutable_db_options_,
                                   log_buffer));
       TEST_SYNC_POINT("DBImpl::BackgroundCompaction():AfterPickCompaction");
@@ -3190,6 +3195,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
           // files that are currently being compacted. If we need another
           // compaction, we might be able to execute it in parallel, so we add
           // it to the queue and schedule a new thread.
+          // 如果当前cfd仍然需要compaction，则将当前的cfd添加到compaction queue，调度另一个线程并行compaction
           if (cfd->NeedsCompaction()) {
             // Yes, we need more compactions!
             AddToCompactionQueue(cfd);
@@ -3206,6 +3212,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     // Nothing to do
     ROCKS_LOG_BUFFER(log_buffer, "Compaction nothing to do");
   } else if (c->deletion_compaction()) {
+    //* deletion compaction
     // TODO(icanadi) Do we want to honor snapshots here? i.e. not delete old
     // file if there is alive snapshot pointing to it
     TEST_SYNC_POINT_CALLBACK("DBImpl::BackgroundCompaction:BeforeCompaction",
@@ -3237,6 +3244,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     TEST_SYNC_POINT_CALLBACK("DBImpl::BackgroundCompaction:AfterCompaction",
                              c->column_family_data());
   } else if (!trivial_move_disallowed && c->IsTrivialMove()) {
+    // *trivial move
     TEST_SYNC_POINT("DBImpl::BackgroundCompaction:TrivialMove");
     TEST_SYNC_POINT_CALLBACK("DBImpl::BackgroundCompaction:BeforeCompaction",
                              c->column_family_data());
@@ -3319,6 +3327,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
                      ->MaxOutputLevel(
                          immutable_db_options_.allow_ingest_behind) &&
              env_->GetBackgroundThreads(Env::Priority::BOTTOM) > 0) {
+    //* Bottom Compaction
     // Forward compactions involving last level to the bottom pool if it exists,
     // such that compactions unlikely to contribute to write stalls can be
     // delayed or deprioritized.
@@ -3347,6 +3356,9 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     GetSnapshotContext(job_context, &snapshot_seqs,
                        &earliest_write_conflict_snapshot, &snapshot_checker);
     assert(is_snapshot_supported_ || snapshots_.empty());
+    // 核心的数据结构就是CompactionJob,每一次的compact都是一个job
+    // 在RocksDB中，Compact是会多线程并发的执行，而这里怎样并发，并发多少线程都是在CompactionJob中实现的，
+    // 简单来说，当你的compact的文件range不重合的话，那么都是可以并发执行的。
     CompactionJob compaction_job(
         job_context->job_id, c.get(), immutable_db_options_,
         mutable_db_options_, file_options_for_compaction_, versions_.get(),
@@ -3363,6 +3375,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
         is_manual ? manual_compaction->canceled : nullptr, db_id_,
         db_session_id_, c->column_family_data()->GetFullHistoryTsLow(),
         &blob_callback_);
+    // 执行前的准备工作
     compaction_job.Prepare();
 
     NotifyOnCompactionBegin(c->column_family_data(), c.get(), status,
@@ -3371,6 +3384,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     TEST_SYNC_POINT_CALLBACK(
         "DBImpl::BackgroundCompaction:NonTrivial:BeforeRun", nullptr);
     // Should handle erorr?
+    // 执行compaction
     compaction_job.Run().PermitUncheckedError();
     TEST_SYNC_POINT("DBImpl::BackgroundCompaction:NonTrivial:AfterRun");
     mutex_.Lock();

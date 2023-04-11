@@ -1795,6 +1795,9 @@ class DBImpl : public DB {
   void SchedulePendingCompaction(ColumnFamilyData* cfd);
   void SchedulePendingPurge(std::string fname, std::string dir_to_sync,
                             FileType type, uint64_t number, int job_id);
+
+  // 在RocksDB中所有的compact都是在后台线程中进行的，这个线程就是BGWorkCompaction.这个线程只有在两种情况下被调用，
+  // 一个是手动compact(RunManualCompaction),一个就是自动(MaybeScheduleFlushOrCompaction),
   static void BGWorkCompaction(void* arg);
   // Runs a pre-chosen universal compaction involving bottom level in a
   // separate, bottom-pri thread pool.
@@ -2154,12 +2157,20 @@ class DBImpl : public DB {
   // and unscheduled_compactions_. That way we keep track of number of
   // compaction and flush threads we need to schedule. This scheduling is done
   // in MaybeScheduleFlushOrCompaction()
-  
-  // flush_queue_的队列会保存所有的将要被flush到磁盘的ColumnFamily.
+
+  // 在全局的DBImpl中包含了一个flush_queue_的队列，这个队列将会保存所有的将要被flush到磁盘的ColumnFamily.
   // 只有当当前的ColumnFamily满足flush条件（cfd->imm()->IsFlushPending()）才会将此CF加入到flush队列
+  // 加入flush队列的条件：MemTableList::IsFlushPending()，具体为cfd->imm()->IsFlushPending()
+  // 加入flush队列的时间：在SchedulePendingFlush函数中，将对应的ColumnFamily加入到flushqueue中
+  // flush的实现：后台线程BGWorkFlush调用BackgroundFlush，在flush_queue_中找到一个ColumnFamily然后刷新它的memtable到磁盘
   // invariant(column family present in flush_queue_ <==>
   // ColumnFamilyData::pending_flush_ == true)
   std::deque<FlushRequest> flush_queue_;
+
+  // 类似flush的逻辑，compact的时候RocksDB也有一个队列叫做DBImpl::compaction_queue_.
+  // unscheduled_compactions_和compaction队列的更新是同步的
+  // 加入compaction队列的时间：SchedulePendingCompaction
+  // 加入compaction队列：AddToCompactionQueue
   // invariant(column family present in compaction_queue_ <==>
   // ColumnFamilyData::pending_compaction_ == true)
   std::deque<ColumnFamilyData*> compaction_queue_;
@@ -2174,7 +2185,9 @@ class DBImpl : public DB {
   // A queue to store log writers to close
   std::deque<log::Writer*> logs_to_free_queue_;
   std::deque<SuperVersion*> superversions_to_free_queue_;
+  // 需要被flush的columnfamily的队列长度
   int unscheduled_flushes_;
+  // 需要被compact的columnfamily的队列长度，与compaction_queue_同时更新
   int unscheduled_compactions_;
 
   // count how many background compactions are running or have been scheduled in

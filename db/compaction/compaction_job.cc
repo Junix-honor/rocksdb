@@ -522,6 +522,8 @@ void CompactionJob::ReportStartedCompaction(Compaction* compaction) {
   compaction_job_stats_->is_full_compaction = compaction->is_full_compaction();
 }
 
+// 主要是做一些执行前的准备工作，首先是取得对应的compact的边界，
+// 这里每一个需要并发的compact都被抽象为一个sub compaction.
 void CompactionJob::Prepare() {
   AutoThreadOperationStageUpdater stage_updater(
       ThreadStatus::STAGE_COMPACTION_PREPARE);
@@ -539,6 +541,7 @@ void CompactionJob::Prepare() {
   if (c->ShouldFormSubcompactions()) {
     {
       StopWatch sw(db_options_.clock, stats_, SUBCOMPACTION_SETUP_TIME);
+      // 在GenSubcompactionBoundaries会解析到对应的sub compaction以及边界.
       GenSubcompactionBoundaries();
     }
     assert(sizes_.size() == boundaries_.size() + 1);
@@ -569,6 +572,7 @@ struct RangeWithSize {
       : range(a, b), size(s) {}
 };
 
+// 在 GenSubcompactionBoundaries 会解析到对应的sub compaction以及边界.
 void CompactionJob::GenSubcompactionBoundaries() {
   auto* c = compact_->compaction;
   auto* cfd = c->column_family_data();
@@ -577,6 +581,7 @@ void CompactionJob::GenSubcompactionBoundaries() {
   int start_lvl = c->start_level();
   int out_lvl = c->output_level();
 
+  //! 遍历所有的需要compact的level,然后取得每一个level的边界(也就是最大最小key)。
   // Add the starting and/or ending key of certain input files as a potential
   // boundary
   for (size_t lvl_idx = 0; lvl_idx < c->num_input_levels(); lvl_idx++) {
@@ -613,12 +618,13 @@ void CompactionJob::GenSubcompactionBoundaries() {
       }
     }
   }
-
+  //! 对边界点bounds进行排序
   std::sort(bounds.begin(), bounds.end(),
             [cfd_comparator](const Slice& a, const Slice& b) -> bool {
               return cfd_comparator->Compare(ExtractUserKey(a),
                                              ExtractUserKey(b)) < 0;
             });
+  //! 对边界点bounds去重复
   // Remove duplicated entries from bounds
   bounds.erase(
       std::unique(bounds.begin(), bounds.end(),
@@ -628,6 +634,7 @@ void CompactionJob::GenSubcompactionBoundaries() {
                   }),
       bounds.end());
 
+  //! 将连续的键范围边界合并成ranges
   // Combine consecutive pairs of boundaries into ranges with an approximate
   // size of data covered by keys in that range
   uint64_t sum = 0;
@@ -636,6 +643,7 @@ void CompactionJob::GenSubcompactionBoundaries() {
   // earlier in SetInputVersioCompaction::SetInputVersion and will not change
   // when db_mutex_ is released below
   auto* v = compact_->compaction->input_version();
+  // 循环遍历 bounds 列表，每次迭代处理两个连续的边界键（a 和 b）
   for (auto it = bounds.begin();;) {
     const Slice a = *it;
     ++it;
@@ -645,7 +653,7 @@ void CompactionJob::GenSubcompactionBoundaries() {
     }
 
     const Slice b = *it;
-
+    // 为了估计这个范围内的数据大小，调用 versions_->ApproximateSize() 方法
     // ApproximateSize could potentially create table reader iterator to seek
     // to the index block and may incur I/O cost in the process. Unlock db
     // mutex to reduce contention
@@ -658,7 +666,9 @@ void CompactionJob::GenSubcompactionBoundaries() {
     sum += size;
   }
 
+  //! 计算理想情况下所需要的subcompactions的个数以及输出文件的个数
   // Group the ranges into subcompactions
+  // 每个输出文件至少要填充的数据大小占比，4/5即80%
   const double min_file_fill_percent = 4.0 / 5;
   int base_level = v->storage_info()->base_level();
   uint64_t max_output_files = static_cast<uint64_t>(std::ceil(
@@ -672,6 +682,7 @@ void CompactionJob::GenSubcompactionBoundaries() {
                 static_cast<uint64_t>(c->max_subcompactions()),
                 max_output_files});
 
+  //! 最后更新boundaries_，这里会根据根据文件的大小，通过平均的size,来把所有的range分为几份，最终这些都会保存在boundaries_中.
   if (subcompactions > 1) {
     double mean = sum * 1.0 / subcompactions;
     // Greedily add ranges to the subcompaction until the sum of the ranges'
@@ -712,6 +723,7 @@ Status CompactionJob::Run() {
   // Launch a thread for each of subcompactions 1...num_threads-1
   std::vector<port::Thread> thread_pool;
   thread_pool.reserve(num_threads - 1);
+  // 遍历所有的sub_compact,然后启动线程来进行对应的compact工作
   for (size_t i = 1; i < compact_->sub_compact_states.size(); i++) {
     thread_pool.emplace_back(&CompactionJob::ProcessKeyValueCompaction, this,
                              &compact_->sub_compact_states[i]);
@@ -721,6 +733,7 @@ Status CompactionJob::Run() {
   // others) in the current thread to be efficient with resources
   ProcessKeyValueCompaction(&compact_->sub_compact_states[0]);
 
+  // 等待所有线程完成
   // Wait for all other threads (if there are any) to finish execution
   for (auto& thread : thread_pool) {
     thread.join();

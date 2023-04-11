@@ -2749,12 +2749,12 @@ void VersionStorageInfo::ComputeCompactionScore(
         score = static_cast<double>(num_sorted_runs) /
                 mutable_cf_options.level0_file_num_compaction_trigger;
         //! 3.如果当前不止一层level,那么将会从上面的score和(total_size/max_bytes_for_level_base)取最大值
-        //!之所以要做第三步，主要还是为了防止level-0的文件size过大，那么当它需要compact的时候有可能会需要和level-1
-        //!compact,那么此时就有可能会有一个很大的compact.
         if (compaction_style_ == kCompactionStyleLevel && num_levels() > 1) {
           // Level-based involves L0->L0 compactions that can lead to oversized
           // L0 files. Take into account size as well to avoid later giant
           // compactions to the base level.
+        //之所以要做第三步，主要还是为了防止level-0的文件size过大，那么当它需要compact的时候有可能会需要和level-1
+        //compact,那么此时就有可能会有一个很大的compact.
           uint64_t l0_target_size = mutable_cf_options.max_bytes_for_level_base;
           if (immutable_options.level_compaction_dynamic_level_bytes &&
               level_multiplier_ != 0.0) {
@@ -2768,6 +2768,7 @@ void VersionStorageInfo::ComputeCompactionScore(
                          static_cast<uint64_t>(level_max_bytes_[base_level_] /
                                                level_multiplier_));
           }
+          // 从上面的score和(total_size/max_bytes_for_level_base)取最大值
           score =
               std::max(score, static_cast<double>(total_size) / l0_target_size);
         }
@@ -3683,6 +3684,16 @@ void VersionStorageInfo::CalculateBaseBytes(const ImmutableOptions& ioptions,
   level_max_bytes_.resize(ioptions.num_levels);
   if (!ioptions.level_compaction_dynamic_level_bytes) {
     //*level_compaction_dynamic_level_bytes is false
+
+    // level_max_bytes将会这样 设置(这里我们只关注level)：
+    // 1.如果是level-1那么level-1的的文件大小限制为options.max_bytes_for_level_base.
+    // 2.如果level大于1那么当前level-i的大小限制为(其中max_bytes这两个变量都是options中设置的)
+    // Target_Size(Ln+1) = Target_Size(Ln) * max_bytes_for_level_multiplier *
+    // max_bytes_for_level_multiplier_additional[n].
+
+    // 举个例子,如果max_bytes_for_level_base=1024,max_bytes_for_level_multiplier=10,
+    // 然后max_bytes_for_level_multiplier_additional未设置，那么L1,
+    // L2,L3的大小限制分别为1024,10240,102400.
     base_level_ = (ioptions.compaction_style == kCompactionStyleLevel) ? 1 : -1;
 
     // Calculate for static bytes base case
@@ -3706,8 +3717,14 @@ void VersionStorageInfo::CalculateBaseBytes(const ImmutableOptions& ioptions,
     }
   } else {
     //*level_compaction_dynamic_level_bytes is true
+    // 每次计算出来的每个level的最大值都是不一样的,
+    // 首先我们要知道调用CalculateBaseBytes是在每次创建version的时候。
+    // 因此他是这样计算的:
+    // 1.最大的level(num_levels-1 )的大小限制是不计入计算的
+    // 2.然后就是这样计算:Target_Size(Ln-1) = Target_Size(Ln) / max_bytes_for_level_multiplier
     uint64_t max_level_size = 0;
 
+    // 首先计算第一个非空的level.
     int first_non_empty_level = -1;
     // Find size of non-L0 level of most data.
     // Cannot use the size of the last level because it can be empty or less
@@ -3739,7 +3756,7 @@ void VersionStorageInfo::CalculateBaseBytes(const ImmutableOptions& ioptions,
       for (const auto& f : files_[0]) {
         l0_size += f->fd.GetFileSize();
       }
-
+      // 得到最小的那个非0的level的size.
       uint64_t base_bytes_max =
           std::max(options.max_bytes_for_level_base, l0_size);
       uint64_t base_bytes_min = static_cast<uint64_t>(
@@ -3753,6 +3770,7 @@ void VersionStorageInfo::CalculateBaseBytes(const ImmutableOptions& ioptions,
             cur_level_size / options.max_bytes_for_level_multiplier);
       }
 
+      // 找到base_level_size，一般来说也就是cur_level_size.
       // Calculate base level and its size.
       uint64_t base_level_size;
       if (cur_level_size <= base_bytes_min) {
@@ -3803,7 +3821,7 @@ void VersionStorageInfo::CalculateBaseBytes(const ImmutableOptions& ioptions,
               1.0 / static_cast<double>(num_levels_ - base_level_ - 1));
         }
       }
-
+      // 然后给level_max_bytes_ 赋值
       uint64_t level_size = base_level_size;
       for (int i = base_level_; i < num_levels_; i++) {
         if (i > base_level_) {
