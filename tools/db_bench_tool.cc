@@ -35,6 +35,7 @@
 #include <queue>
 #include <thread>
 #include <unordered_map>
+#include <string>
 
 #include "db/db_impl/db_impl.h"
 #include "db/malloc_stats.h"
@@ -2143,9 +2144,10 @@ static std::unordered_map<OperationType, std::string, std::hash<unsigned char>>
 
 class CombinedStats;
 class Stats {
+public:
+  int id_;
  private:
   SystemClock* clock_;
-  int id_;
   uint64_t start_ = 0;
   uint64_t sine_interval_;
   uint64_t finish_;
@@ -4944,18 +4946,22 @@ class Benchmark {
     int64_t stage = 0;
     int64_t num_written = 0;
 
+#ifdef STATISTIC_OPEN
     int64_t t_last_num = 0;
     int64_t t_last_bytes = 0;
-    double t_start_time = Env::Default()->NowMicros();
+    double t_start_time = bench_start_time;
     double t_last_time = t_start_time;
     double t_cur_time;
-    int64_t t_unix_time;
-#ifdef STATISTIC_OPEN
-    bench_start_time = t_start_time;
+    std::string file_name =
+        "exp_throughput_" + std::to_string(thread->stats.id_);
+    FILE* fp = fopen(file_name.c_str(), "w");
+    if (fp == nullptr) printf("log failed\n");
+    fprintf(fp, "now,bw,iops,size,average bw,average iops\n");
+    fclose(fp);
 #endif
 
-    //! 开始循环
-    while ((num_per_key_gen != 0) && !duration.Done(entries_per_batch_)) {
+      //! 开始循环
+      while ((num_per_key_gen != 0) && !duration.Done(entries_per_batch_)) {
       if (duration.GetStage() != stage) {
         stage = duration.GetStage();
         if (db_.db != nullptr) {
@@ -5239,46 +5245,55 @@ class Benchmark {
 #ifdef STATISTIC_OPEN
       if (db_.db != nullptr) {
         t_cur_time = Env::Default()->NowMicros();
-        Env::Default()->GetCurrentTime(&t_unix_time);
-        if (t_cur_time - t_last_time > 1 * 1e6) {
+        // Env::Default()->GetCurrentTime(&t_unix_time);
+        if (t_cur_time - t_last_time > 0.1 * 1e6) {
           double use_time = (t_cur_time - t_last_time) * 1e-6;
           int64_t ebytes = bytes - t_last_bytes;
           double now = (t_cur_time - t_start_time) * 1e-6;
           int64_t written_num = num_written - t_last_num;
 
-          RECORD_INFO(1, "%" PRId64 ",%.2f,%.2f,%.1f,%.1f,%.2f,%.1f \n",
-                      t_unix_time, now, (1.0 * ebytes / 1048576.0) / use_time,
-                      1.0 * written_num / use_time, 1.0 * bytes / 1048576.0,
-                      (1.0 * bytes / 1048576.0) / now, 1.0 * num_written / now);
+          fp = fopen(file_name.c_str(), "a");
+          if (fp == nullptr) printf("log failed\n");
+          // RECORD_INFO(1, "%" PRId64 ",%.2f,%.2f,%.1f,%.1f,%.2f,%.1f \n",
+          //             t_unix_time, now, (1.0 * ebytes / 1048576.0) / use_time,
+          //             1.0 * written_num / use_time, 1.0 * bytes / 1048576.0,
+          //             (1.0 * bytes / 1048576.0) / now, 1.0 * num_written / now);
+          fprintf(fp, "%.2f,%.2f,%.1f,%.1f,%.2f,%.1f \n",
+                  now, (1.0 * ebytes / 1048576.0) / use_time,
+                  1.0 * written_num / use_time, 1.0 * bytes / 1048576.0,
+                  (1.0 * bytes / 1048576.0) / now, 1.0 * num_written / now);
+          fclose(fp);
 
           t_last_time = t_cur_time;
           t_last_bytes = bytes;
           t_last_num = num_written;
 
-          std::string stats;
-          // db_with_cfh->db->GetProperty("rocksdb.levelstats", &stats);
-          db_with_cfh->db->GetProperty("rocksdb.stats", &stats);
-          RECORD_INFO(2, "now= %.2f s\n%s\n", now, stats.c_str());
+          if(thread->stats.id_ == 0){
+            std::string stats;
+            // db_with_cfh->db->GetProperty("rocksdb.levelstats", &stats);
+            db_with_cfh->db->GetProperty("rocksdb.stats", &stats);
+            RECORD_INFO(2, "now= %.2f s\n%s\n", now, stats.c_str());
 
-          std::string num_unflushed_memtables;
-          std::string num_l0_files;
-          std::string num_compaction_needed_bytes;
-          if (!db_with_cfh->db->GetProperty("rocksdb.num-immutable-mem-table",
-                                            &num_unflushed_memtables)) {
-            num_unflushed_memtables = "(failed)";
+            std::string num_unflushed_memtables;
+            std::string num_l0_files;
+            std::string num_compaction_needed_bytes;
+            if (!db_with_cfh->db->GetProperty("rocksdb.num-immutable-mem-table",
+                                              &num_unflushed_memtables)) {
+              num_unflushed_memtables = "(failed)";
+            }
+            if (!db_with_cfh->db->GetProperty("rocksdb.num-files-at-level0",
+                                              &num_l0_files)) {
+              num_l0_files = "(failed)";
+            }
+            if (!db_with_cfh->db->GetProperty(
+                    "rocksdb.estimate-pending-compaction-bytes",
+                    &num_compaction_needed_bytes)) {
+              num_compaction_needed_bytes = "(failed)";
+            }
+            RECORD_INFO(4, "%.2f,%s,%s,%s\n", now,
+                        num_unflushed_memtables.c_str(), num_l0_files.c_str(),
+                        num_compaction_needed_bytes.c_str());
           }
-          if (!db_with_cfh->db->GetProperty("rocksdb.num-files-at-level0",
-                                            &num_l0_files)) {
-            num_l0_files = "(failed)";
-          }
-          if (!db_with_cfh->db->GetProperty(
-                  "rocksdb.estimate-pending-compaction-bytes",
-                  &num_compaction_needed_bytes)) {
-            num_compaction_needed_bytes = "(failed)";
-          }
-          RECORD_INFO(4, "%.2f,%s,%s,%s\n", now,
-                      num_unflushed_memtables.c_str(), num_l0_files.c_str(),
-                      num_compaction_needed_bytes.c_str());
         }
       }
       // else{
@@ -5287,7 +5302,7 @@ class Benchmark {
       //   }
       // }
 #endif
-    }
+      }
     if ((write_mode == UNIQUE_RANDOM) && (p > 0.0)) {
       fprintf(stdout,
               "Number of unique keys inserted: %" PRIu64
@@ -8194,6 +8209,15 @@ int db_bench_tool(int argc, char** argv) {
 
 #ifdef STATISTIC_OPEN
   init_log_file();
+  int64_t t_unix_time;
+  Env::Default()->GetCurrentTime(&t_unix_time);
+  bench_start_time = Env::Default()->NowMicros();
+  RECORD_INFO(1, "%" PRId64, t_unix_time);
+  
+  for (int i = 0; i < argc; ++i) {
+    printf("%s ", argv[i]);
+  }
+  printf("\n");
 #endif
   ROCKSDB_NAMESPACE::port::InstallStackTraceHandler();
   ConfigOptions config_options;

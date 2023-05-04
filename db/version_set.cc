@@ -2791,6 +2791,7 @@ void VersionStorageInfo::ComputeCompactionScore(
     compaction_score_[level] = score;
   }
 
+  //!排序
   // sort all the levels based on their score. Higher scores get listed
   // first. Use bubble sort because the number of entries are small.
   for (int i = 0; i < num_levels() - 2; i++) {

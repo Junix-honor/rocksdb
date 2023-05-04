@@ -171,6 +171,15 @@ void LevelCompactionBuilder::PickFileToCompact(
 
 // 遍历所有的level,然后来选择对应需要compact的input和output
 void LevelCompactionBuilder::SetupInitialFiles() {
+#ifdef STATISTIC_OPEN
+  for (int i = 0; i < compaction_picker_->NumberLevels() - 1; i++) {
+    double test_start_level_score_ = vstorage_->CompactionScore(i);
+    int test_start_level_ = vstorage_->CompactionScoreLevel(i);
+    double now = (ioptions_.env->NowMicros() - bench_start_time) * 1e-6;
+    RECORD_INFO(6, "%.2f,%d,%lf\n", now, test_start_level_,
+                test_start_level_score_);
+  }
+#endif
   // Find the compactions by size on all levels.
   bool skipped_l0_to_base = false;
   for (int i = 0; i < compaction_picker_->NumberLevels() - 1; i++) {
@@ -212,11 +221,11 @@ void LevelCompactionBuilder::SetupInitialFiles() {
           // In these cases, to reduce L0 file count and thus reduce likelihood
           // of write stalls, we can attempt compacting a span of files within
           // L0.
-          if (PickIntraL0Compaction()) {
-            output_level_ = 0;
-            compaction_reason_ = CompactionReason::kLevelL0FilesNum;
-            break;
-          }
+          // if (PickIntraL0Compaction()) {
+          //   output_level_ = 0;
+          //   compaction_reason_ = CompactionReason::kLevelL0FilesNum;
+          //   break;
+          // }
         }
       }
     } else {
@@ -478,7 +487,7 @@ bool LevelCompactionBuilder::PickFileToCompact() {
     //!首先选择好文件之后，会继续选择范围重叠的文件，扩展当前文件的key的范围，得到一个”cleancut”的范围
 
     // FilesRangeOverlapWithCompaction:
-    // 选择好之后，会再做一次判断，这次是判断是否正在compact的out_level的文件范围
+    // !选择好之后，会再做一次判断，这次是判断是否正在compact的out_level的文件范围
     // 是否和我们选择好的文件的key有重合，如果有，则跳过这个文件.
     // 这里之所以会有这个判断，主要原因还是因为compact是会并行的执行的.
 

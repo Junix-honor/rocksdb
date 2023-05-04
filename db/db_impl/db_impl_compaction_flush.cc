@@ -1328,6 +1328,11 @@ Status DBImpl::CompactFilesImpl(
 
   // At this point, CompactFiles will be run.
   bg_compaction_scheduled_++;
+#ifdef STATISTIC_OPEN
+  double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+  RECORD_INFO(8, "%.2f,bg_compaction_scheduled,%d\n", now,
+              bg_compaction_scheduled_);
+#endif
 
   std::unique_ptr<Compaction> c;
   assert(cfd->compaction_picker());
@@ -1454,6 +1459,11 @@ Status DBImpl::CompactFilesImpl(
   c.reset();
 
   bg_compaction_scheduled_--;
+#ifdef STATISTIC_OPEN
+  now = (env_->NowMicros() - bench_start_time) * 1e-6;
+  RECORD_INFO(8, "%.2f,bg_compaction_scheduled,%d\n", now,
+              bg_compaction_scheduled_);
+#endif
   if (bg_compaction_scheduled_ == 0) {
     bg_cv_.SignalAll();
   }
@@ -1904,12 +1914,22 @@ Status DBImpl::RunManualCompaction(
       if (compaction->bottommost_level() &&
           env_->GetBackgroundThreads(Env::Priority::BOTTOM) > 0) {
         bg_bottom_compaction_scheduled_++;
+#ifdef STATISTIC_OPEN
+        double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+        RECORD_INFO(8, "%.2f,bg_bottom_compaction_scheduled,%d\n", now,
+                    bg_bottom_compaction_scheduled_);
+#endif
         ca->compaction_pri_ = Env::Priority::BOTTOM;
         env_->Schedule(&DBImpl::BGWorkBottomCompaction, ca,
                        Env::Priority::BOTTOM, this,
                        &DBImpl::UnscheduleCompactionCallback);
       } else {
         bg_compaction_scheduled_++;
+#ifdef STATISTIC_OPEN
+        double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+        RECORD_INFO(8, "%.2f,bg_compaction_scheduled,%d\n", now,
+                    bg_compaction_scheduled_);
+#endif
         ca->compaction_pri_ = Env::Priority::LOW;
         env_->Schedule(&DBImpl::BGWorkCompaction, ca, Env::Priority::LOW, this,
                        &DBImpl::UnscheduleCompactionCallback);
@@ -2365,7 +2385,7 @@ void DBImpl::EnableManualCompaction() {
 //而MaybeScheduleFlushOrCompaction就是会在切换WAL(SwitchWAL)或者writebuffer满的时候(HandleWriteBufferFull)被调用.
 void DBImpl::MaybeScheduleFlushOrCompaction() {
   mutex_.AssertHeld();
-  
+
   //特殊情况处理
   if (!opened_successfully_) {
     // Compaction may introduce data race to DB open
@@ -2400,6 +2420,11 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
     env_->Schedule(&DBImpl::BGWorkFlush, fta, Env::Priority::HIGH, this,
                    &DBImpl::UnscheduleFlushCallback);
     --unscheduled_flushes_;
+#ifdef STATISTIC_OPEN
+    double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+    RECORD_INFO(8, "%.2f,unscheduled_flushes,%d\n", now, unscheduled_flushes_);
+    RECORD_INFO(8, "%.2f,bg_flush_scheduled,%d\n", now, bg_flush_scheduled_);
+#endif
     TEST_SYNC_POINT_CALLBACK(
         "DBImpl::MaybeScheduleFlushOrCompaction:AfterSchedule:0",
         &unscheduled_flushes_);
@@ -2419,6 +2444,12 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
       env_->Schedule(&DBImpl::BGWorkFlush, fta, Env::Priority::LOW, this,
                      &DBImpl::UnscheduleFlushCallback);
       --unscheduled_flushes_;
+#ifdef STATISTIC_OPEN
+      double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+      RECORD_INFO(8, "%.2f,bg_flush_scheduled,%d\n", now, bg_flush_scheduled_);
+      RECORD_INFO(8, "%.2f,unscheduled_flushes,%d\n", now,
+                  unscheduled_flushes_);
+#endif
     }
   }
 
@@ -2450,9 +2481,23 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
     ca->prepicked_compaction = nullptr;
     bg_compaction_scheduled_++;
     unscheduled_compactions_--;
+#ifdef STATISTIC_OPEN
+    double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+    RECORD_INFO(8, "%.2f,bg_compaction_scheduled,%d\n", now,
+                bg_compaction_scheduled_);
+    RECORD_INFO(8, "%.2f,unscheduled_compactions,%d\n", now, 
+                unscheduled_compactions_);
+#endif
     env_->Schedule(&DBImpl::BGWorkCompaction, ca, Env::Priority::LOW, this,
                    &DBImpl::UnscheduleCompactionCallback);
   }
+// #ifdef STATISTIC_OPEN
+//   double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+//   RECORD_INFO(8, "%.2f,%d,%d,%d,%d,%d,%d,%d,%d\n", now, unscheduled_flushes_,
+//               unscheduled_compactions_, bg_bottom_compaction_scheduled_,
+//               bg_compaction_scheduled_, num_running_compactions_,
+//               bg_flush_scheduled_, num_running_flushes_, bg_purge_scheduled_);
+// #endif
 }
 
 DBImpl::BGJobLimits DBImpl::GetBGJobLimits() const {
@@ -2577,6 +2622,11 @@ void DBImpl::SchedulePendingFlush(const FlushRequest& flush_req,
       cfd->set_queued_for_flush(true);
       cfd->SetFlushReason(flush_reason);
       ++unscheduled_flushes_;
+#ifdef STATISTIC_OPEN
+      double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+      RECORD_INFO(8, "%.2f,unscheduled_flushes,%d\n", now,
+                  unscheduled_flushes_);
+#endif
       flush_queue_.push_back(flush_req);
     }
   } else {
@@ -2587,6 +2637,10 @@ void DBImpl::SchedulePendingFlush(const FlushRequest& flush_req,
       cfd->SetFlushReason(flush_reason);
     }
     ++unscheduled_flushes_;
+#ifdef STATISTIC_OPEN
+    double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+    RECORD_INFO(8, "%.2f,unscheduled_flushes,%d\n", now, unscheduled_flushes_);
+#endif
     flush_queue_.push_back(flush_req);
   }
 }
@@ -2597,6 +2651,11 @@ void DBImpl::SchedulePendingCompaction(ColumnFamilyData* cfd) {
   if (!cfd->queued_for_compaction() && cfd->NeedsCompaction()) {
     AddToCompactionQueue(cfd);
     ++unscheduled_compactions_;
+#ifdef STATISTIC_OPEN
+    double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+    RECORD_INFO(8, "%.2f,unscheduled_compactions,%d\n", now,
+                unscheduled_compactions_);
+#endif
   }
 }
 
@@ -2654,9 +2713,19 @@ void DBImpl::UnscheduleCompactionCallback(void* arg) {
   if (Env::Priority::BOTTOM == compaction_pri) {
     // Decrement bg_bottom_compaction_scheduled_ if priority is BOTTOM
     ca_ptr->db->bg_bottom_compaction_scheduled_--;
+#ifdef STATISTIC_OPEN
+    double now = (ca_ptr->db->env_->NowMicros() - bench_start_time) * 1e-6;
+    RECORD_INFO(8, "%.2f,bg_bottom_compaction_scheduled,%d\n", now,
+                ca_ptr->db->bg_bottom_compaction_scheduled_);
+#endif
   } else if (Env::Priority::LOW == compaction_pri) {
     // Decrement bg_compaction_scheduled_ if priority is LOW
     ca_ptr->db->bg_compaction_scheduled_--;
+#ifdef STATISTIC_OPEN
+    double now = (ca_ptr->db->env_->NowMicros() - bench_start_time) * 1e-6;
+    RECORD_INFO(8, "%.2f,bg_compaction_scheduled,%d\n", now,
+                ca_ptr->db->bg_compaction_scheduled_);
+#endif
   }
   CompactionArg ca = *(ca_ptr);
   delete reinterpret_cast<CompactionArg*>(arg);
@@ -2791,7 +2860,7 @@ void DBImpl::BackgroundCallFlush(Env::Priority thread_pri) {
     InstrumentedMutexLock l(&mutex_);
     assert(bg_flush_scheduled_);
 
-    //增加正在处理的flush计数：num_running_flushes++
+    //增加正在处理的flush计数
     num_running_flushes_++;
 
     //记录插入到pending_outputs_中的number
@@ -2858,6 +2927,10 @@ void DBImpl::BackgroundCallFlush(Env::Priority thread_pri) {
     assert(num_running_flushes_ > 0);
     num_running_flushes_--;
     bg_flush_scheduled_--;
+#ifdef STATISTIC_OPEN
+    double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+    RECORD_INFO(8, "%.2f,bg_flush_scheduled,%d\n", now, bg_flush_scheduled_);
+#endif
 
     //调用MaybeScheduleFlushOrCompaction，尝试触发下一次flush或者compaction
     // See if there's more work to be done
@@ -2885,8 +2958,10 @@ void DBImpl::BackgroundCallCompaction(PrepickedCompaction* prepicked_compaction,
     // IngestExternalFile() calls to finish.
     WaitForIngestFile();
 
+    // 增加正在处理的compaction计数
     num_running_compactions_++;
 
+    // 记录插入到pending_outputs_中的number
     std::unique_ptr<std::list<uint64_t>::iterator>
         pending_outputs_inserted_elem(new std::list<uint64_t>::iterator(
             CaptureCurrentFileNumberInPendingOutputs()));
@@ -2894,6 +2969,7 @@ void DBImpl::BackgroundCallCompaction(PrepickedCompaction* prepicked_compaction,
     assert((bg_thread_pri == Env::Priority::BOTTOM &&
             bg_bottom_compaction_scheduled_) ||
            (bg_thread_pri == Env::Priority::LOW && bg_compaction_scheduled_));
+    // 调用BackgroundCompaction进行compaction操作
     Status s = BackgroundCompaction(&made_progress, &job_context, &log_buffer,
                                     prepicked_compaction, bg_thread_pri);
     TEST_SYNC_POINT("BackgroundCallCompaction:1");
@@ -2905,10 +2981,11 @@ void DBImpl::BackgroundCallCompaction(PrepickedCompaction* prepicked_compaction,
       mutex_.Lock();
     } else if (!s.ok() && !s.IsShutdownInProgress() &&
                !s.IsManualCompactionPaused() && !s.IsColumnFamilyDropped()) {
-      // Wait a little bit before retrying background compaction in
-      // case this is an environmental problem and we do not want to
-      // chew up resources for failed compactions for the duration of
-      // the problem.
+      // *当发生错误返回的状态不是ok的时候处理错误
+      //  Wait a little bit before retrying background compaction in
+      //  case this is an environmental problem and we do not want to
+      //  chew up resources for failed compactions for the duration of
+      //  the problem.
       uint64_t error_cnt =
           default_cf_internal_stats_->BumpAndGetBackgroundErrorCount();
       bg_cv_.SignalAll();  // In case a waiter can proceed despite the error
@@ -2927,9 +3004,10 @@ void DBImpl::BackgroundCallCompaction(PrepickedCompaction* prepicked_compaction,
       ROCKS_LOG_BUFFER(&log_buffer, "[%s] [JOB %d] Manual compaction paused",
                        m->cfd->GetName().c_str(), job_context.job_id);
     }
-
+    // 从pending_outputs_中删除掉前面记录的elem
     ReleaseFileNumberFromPendingOutputs(pending_outputs_inserted_elem);
 
+    // 处理compaction失败时候的临时文件问题
     // If compaction failed, we want to delete all temporary files that we might
     // have created (they might not be all recorded in job_context in case of a
     // failure). Thus, we force full scan in FindObsoleteFiles()
@@ -2957,18 +3035,30 @@ void DBImpl::BackgroundCallCompaction(PrepickedCompaction* prepicked_compaction,
       mutex_.Lock();
     }
 
+    // 正在运行的compaction任务计数减1，同时被安排的compaction任务数减1
     assert(num_running_compactions_ > 0);
     num_running_compactions_--;
     if (bg_thread_pri == Env::Priority::LOW) {
       bg_compaction_scheduled_--;
+#ifdef STATISTIC_OPEN
+      double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+      RECORD_INFO(8, "%.2f,bg_compaction_scheduled,%d\n", now,
+                  bg_compaction_scheduled_);
+#endif
     } else {
       assert(bg_thread_pri == Env::Priority::BOTTOM);
       bg_bottom_compaction_scheduled_--;
+#ifdef STATISTIC_OPEN
+      double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+      RECORD_INFO(8, "%.2f,bg_bottom_compaction_scheduled,%d\n", now,
+                  bg_bottom_compaction_scheduled_);
+#endif
     }
 
     versions_->GetColumnFamilySet()->FreeDeadColumnFamilies();
 
-    // See if there's more work to be done
+    // 调用MaybeScheduleFlushOrCompaction，尝试触发下一次flush或者compaction
+    //  See if there's more work to be done
     MaybeScheduleFlushOrCompaction();
 
     if (prepicked_compaction != nullptr &&
@@ -3043,6 +3133,11 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     // a chance to execute. Since we didn't pop a cfd from the compaction
     // queue, increment unscheduled_compactions_
     unscheduled_compactions_++;
+#ifdef STATISTIC_OPEN
+    double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+    RECORD_INFO(8, "%.2f,unscheduled_compactions,%d\n", now,
+                unscheduled_compactions_);
+#endif
   }
 
   if (!status.ok()) {
@@ -3116,6 +3211,11 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
 
       // Stay in the compaction queue.
       unscheduled_compactions_++;
+#ifdef STATISTIC_OPEN
+      double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+      RECORD_INFO(8, "%.2f,unscheduled_compactions,%d\n", now,
+                  unscheduled_compactions_);
+#endif
 
       return Status::OK();
     }
@@ -3125,6 +3225,11 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
       // Can't find any executable task from the compaction queue.
       // All tasks have been throttled by compaction thread limiter.
       ++unscheduled_compactions_;
+#ifdef STATISTIC_OPEN
+      double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+      RECORD_INFO(8, "%.2f,unscheduled_compactions,%d\n", now,
+                  unscheduled_compactions_);
+#endif
       return Status::Busy();
     }
 
@@ -3170,6 +3275,11 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
                                        *(c->mutable_cf_options()));
           AddToCompactionQueue(cfd);
           ++unscheduled_compactions_;
+#ifdef STATISTIC_OPEN
+          double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+          RECORD_INFO(8, "%.2f,unscheduled_compactions,%d\n", now,
+                      unscheduled_compactions_);
+#endif
 
           c.reset();
           // Don't need to sleep here, because BackgroundCallCompaction
@@ -3200,6 +3310,11 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
             // Yes, we need more compactions!
             AddToCompactionQueue(cfd);
             ++unscheduled_compactions_;
+#ifdef STATISTIC_OPEN
+            double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+            RECORD_INFO(8, "%.2f,unscheduled_compactions,%d\n", now,
+                        unscheduled_compactions_);
+#endif
             MaybeScheduleFlushOrCompaction();
           }
         }
@@ -3211,6 +3326,10 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
   if (!c) {
     // Nothing to do
     ROCKS_LOG_BUFFER(log_buffer, "Compaction nothing to do");
+#ifdef STATISTIC_OPEN
+    double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+    RECORD_INFO(9, "%.2f\n", now);
+#endif
   } else if (c->deletion_compaction()) {
     //* deletion compaction
     // TODO(icanadi) Do we want to honor snapshots here? i.e. not delete old
@@ -3341,6 +3460,11 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     // Transfer requested token, so it doesn't need to do it again.
     ca->prepicked_compaction->task_token = std::move(task_token);
     ++bg_bottom_compaction_scheduled_;
+#ifdef STATISTIC_OPEN
+    double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+    RECORD_INFO(8, "%.2f,bg_bottom_compaction_scheduled,%d\n", now,
+                bg_bottom_compaction_scheduled_);
+#endif
     env_->Schedule(&DBImpl::BGWorkBottomCompaction, ca, Env::Priority::BOTTOM,
                    this, &DBImpl::UnscheduleCompactionCallback);
   } else {
@@ -3460,6 +3584,11 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
       if (!cfd->queued_for_compaction()) {
         AddToCompactionQueue(cfd);
         ++unscheduled_compactions_;
+#ifdef STATISTIC_OPEN
+        double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+        RECORD_INFO(8, "%.2f,unscheduled_compactions,%d\n", now,
+                    unscheduled_compactions_);
+#endif
       }
     }
   }

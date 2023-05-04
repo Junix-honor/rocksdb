@@ -819,9 +819,11 @@ int GetL0ThresholdSpeedupCompaction(int level0_file_num_compaction_trigger,
     return std::numeric_limits<int>::max();
   }
 
+  //4*2=8
   const int64_t twice_level0_trigger =
       static_cast<int64_t>(level0_file_num_compaction_trigger) * 2;
 
+  //4+(20-4)/4=8
   const int64_t one_fourth_trigger_slowdown =
       static_cast<int64_t>(level0_file_num_compaction_trigger) +
       ((level0_slowdown_writes_trigger - level0_file_num_compaction_trigger) /

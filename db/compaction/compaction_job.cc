@@ -710,6 +710,9 @@ void CompactionJob::GenSubcompactionBoundaries() {
 }
 
 Status CompactionJob::Run() {
+#ifdef STATISTIC_OPEN
+  double start = (env_->NowMicros() - bench_start_time) * 1e-6;
+#endif
   AutoThreadOperationStageUpdater stage_updater(
       ThreadStatus::STAGE_COMPACTION_RUN);
   TEST_SYNC_POINT("CompactionJob::Run():Start");
@@ -896,7 +899,12 @@ Status CompactionJob::Run() {
   RecordCompactionIOStats();
   LogFlush(db_options_.info_log);
   TEST_SYNC_POINT("CompactionJob::Run():End");
-
+#ifdef STATISTIC_OPEN
+    double end = (env_->NowMicros() - bench_start_time) * 1e-6;
+    
+    RECORD_INFO(5, "%d,%d,%.2f,%.2f\n", compact_->compaction->start_level(),
+                compact_->compaction->output_level(), start,end);
+#endif
   compact_->status = status;
   return status;
 }

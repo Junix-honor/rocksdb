@@ -1,5 +1,7 @@
 #include "my_log.h"
 
+std::mutex exp_compaction_lock;
+std::mutex exp_flush_lock;
 uint64_t bench_start_time;
 void init_log_file() {
   bench_start_time = 0;
@@ -8,7 +10,7 @@ void init_log_file() {
   fp = fopen(log_file1.c_str(), "w");
   if (fp == nullptr) printf("log failed\n");
   fclose(fp);
-  RECORD_INFO(1, "unix_time,now,bw,iops,size,average bw,average iops\n");
+  // RECORD_INFO(1, "unix_time,now,bw,iops,size,average bw,average iops\n");
 
   fp = fopen(log_file2.c_str(), "w");
   if (fp == nullptr) printf("log failed\n");
@@ -26,10 +28,35 @@ void init_log_file() {
               "time,num_unflushed_memtables,num_l0_files,num_compaction_needed_"
               "bytes\n");
 
-  // fp = fopen(log_file5.c_str(), "w");
-  // if(fp == nullptr) printf("log failed\n");
-  // fclose(fp);
-  // RECORD_INFO(5,"now(s),through(iops),p90,,,p99,,,p999,,,p9999,,,p99999,,,\n");
+  fp = fopen(log_file5.c_str(), "w");
+  if(fp == nullptr) printf("log failed\n");
+  fclose(fp);
+  RECORD_INFO(5, "start_level,output_level,start,end\n");
+
+  fp = fopen(log_file6.c_str(), "w");
+  if (fp == nullptr) printf("log failed\n");
+  fclose(fp);
+  RECORD_INFO(6, "time,level,score\n");
+
+  fp = fopen(log_file7.c_str(), "w");
+  if (fp == nullptr) printf("log failed\n");
+  fclose(fp);
+  RECORD_INFO(7, "start,end\n");
+
+  fp = fopen(log_file8.c_str(), "w");
+  if (fp == nullptr) printf("log failed\n");
+  fclose(fp);
+  RECORD_INFO(8,"time,type,num\n");
+
+  fp = fopen(log_file9.c_str(), "w");
+  if (fp == nullptr) printf("log failed\n");
+  fclose(fp);
+  RECORD_INFO(9, "time\n");
+
+  fp = fopen(log_file10.c_str(), "w");
+  if (fp == nullptr) printf("log failed\n");
+  fclose(fp);
+  RECORD_INFO(10, "time\n");
 
 #endif
 
@@ -67,9 +94,28 @@ void LZW_LOG(int file_num, const char* format, ...) {
     case 4:
       log_file = &log_file4;
       break;
-    // case 5:
-    //   log_file = &log_file5;
-    //   break;
+    case 5:
+      // exp_compaction
+      exp_compaction_lock.lock();
+      log_file = &log_file5;
+      break;
+    case 6:
+      log_file = &log_file6;
+      break;
+    case 7:
+      // exp_flush
+      exp_flush_lock.lock();
+      log_file = &log_file7;
+      break;
+    case 8:
+      log_file = &log_file8;
+      break;
+    case 9:
+      log_file = &log_file9;
+      break;
+    case 10:
+      log_file = &log_file10;
+      break;
     default:
       return;
   }
@@ -78,4 +124,14 @@ void LZW_LOG(int file_num, const char* format, ...) {
   if (fp == nullptr) printf("log failed\n");
   fprintf(fp, "%s", buf);
   fclose(fp);
+  switch (file_num) {
+    case 5:
+      // exp_compaction
+      exp_compaction_lock.unlock();
+      break;
+    case 7:
+      // exp_flush
+      exp_flush_lock.unlock();
+      break;
+  }
 }

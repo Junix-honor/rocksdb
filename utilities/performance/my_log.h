@@ -4,8 +4,10 @@
 
 #pragma once
 
-#include <string>
 #include <stdarg.h>
+
+#include <mutex>
+#include <string>
 #define STATISTIC_OPEN
 
 #define LZW_INFO
@@ -33,12 +35,16 @@
 #endif
 
 const std::string log_file0("./exp_log");
-const std::string log_file1("./exp_op_time.csv");
+const std::string log_file1("./exp_op_time");
 const std::string log_file2("./exp_op_data");
 const std::string log_file3("./exp_stall.csv");
 const std::string log_file4("./exp_stall_condition.csv");
-// const std::string log_file5("PerSecondLatency.csv");
-
+const std::string log_file5("./exp_compaction.csv");
+const std::string log_file6("./exp_compaction_score.csv");
+const std::string log_file7("./exp_flush.csv");
+const std::string log_file8("./exp_background_schedule.csv");
+const std::string log_file9("./exp_compaction_noting_to_do.csv");
+const std::string log_file10("./exp_switch_memtable.csv");
 
 extern void init_log_file();
 

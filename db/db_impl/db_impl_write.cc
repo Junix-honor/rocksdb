@@ -439,6 +439,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
             write_options.ignore_missing_column_families,
             0 /*recovery_log_number*/, this, parallel, seq_per_batch_,
             batch_per_txn_);
+        // w.status=Status::OK();
       } else {  //支持并发写memtable
         write_group.last_sequence = last_sequence;
         // 调用 LaunchParallelMemTableWriters，遍历 write_group 把 Leader 和
@@ -1867,6 +1868,10 @@ void DBImpl::NotifyOnMemTableSealed(ColumnFamilyData* /*cfd*/,
 // two_write_queues_ is true (This is to simplify the reasoning.)
 Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   mutex_.AssertHeld();
+#ifdef STATISTIC_OPEN
+  double now = (env_->NowMicros() - bench_start_time) * 1e-6;
+  RECORD_INFO(10, "%.2f\n", now);
+#endif
   log::Writer* new_log = nullptr;
   MemTable* new_mem = nullptr;
   IOStatus io_s;
@@ -2065,6 +2070,7 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   //!将新的memtable替换到cfd内同时将旧的加入到imm列表
   cfd->mem()->SetNextLogNumber(logfile_number_);
   assert(new_mem != nullptr);
+  // delete cfd->mem()->Unref();
   cfd->imm()->Add(cfd->mem(), &context->memtables_to_free_);
   new_mem->Ref();
   cfd->SetMemtable(new_mem);

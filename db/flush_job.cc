@@ -202,6 +202,9 @@ void FlushJob::PickMemTable() {
 
 Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
                      bool* switched_to_mempurge) {
+#ifdef STATISTIC_OPEN
+  double start = (db_options_.env->NowMicros() - bench_start_time) * 1e-6;
+#endif
   TEST_SYNC_POINT("FlushJob::Start");
   db_mutex_->AssertHeld();
   assert(pick_memtable_called);
@@ -341,7 +344,10 @@ Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
     stream << "file_cpu_read_nanos"
            << (IOSTATS(cpu_read_nanos) - prev_cpu_read_nanos);
   }
-
+#ifdef STATISTIC_OPEN
+  double end = (db_options_.env->NowMicros() - bench_start_time) * 1e-6;
+  RECORD_INFO(7, "%.2f,%.2f\n", start, end);
+#endif
   return s;
 }
 
