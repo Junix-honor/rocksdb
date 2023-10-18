@@ -3785,6 +3785,10 @@ void VersionStorageInfo::CalculateBaseBytes(const ImmutableOptions& ioptions,
                        "max_bytes_for_level_multiplier may not be guaranteed.");
       } else {
         // Find base level (where L0 data is compacted to).
+        // 如果cur_level_size > max_bytes_for_level_base(256M)，
+        // 则对cur_level_size除以10继续向上调整first_non_empty_level，
+        // 直到调整到某一层，cur_level_size <= max_bytes_for_level_base(256M)，
+        // 此时该层为新的base_level，即新的first_non_empty_level，base_size为cur_level_size
         base_level_ = first_non_empty_level;
         while (base_level_ > 1 && cur_level_size > base_bytes_max) {
           --base_level_;
@@ -3823,6 +3827,7 @@ void VersionStorageInfo::CalculateBaseBytes(const ImmutableOptions& ioptions,
         }
       }
       // 然后给level_max_bytes_ 赋值
+      // 从base_level开始，往下，每一层对base_size乘以10，当做该层新的大小限制
       uint64_t level_size = base_level_size;
       for (int i = base_level_; i < num_levels_; i++) {
         if (i > base_level_) {
@@ -5786,10 +5791,12 @@ void VersionSet::AddLiveFiles(std::vector<uint64_t>* live_table_files,
   }
 }
 
+// 会构造一个堆排序的存储结构，来通过迭代器访问堆顶元素
 InternalIterator* VersionSet::MakeInputIterator(
     const ReadOptions& read_options, const Compaction* c,
     RangeDelAggregator* range_del_agg,
     const FileOptions& file_options_compactions) {
+  // 获取到当前sub_compact的cfd
   auto cfd = c->column_family_data();
   // Level-0 files have to be merged together.  For other levels,
   // we will make a concatenating iterator per level.
@@ -5801,6 +5808,7 @@ InternalIterator* VersionSet::MakeInputIterator(
   size_t num = 0;
   for (size_t which = 0; which < c->num_input_levels(); which++) {
     if (c->input_levels(which)->num_files != 0) {
+      // 针对level-0中的每一个sst文件，构造一个table_cache的迭代器
       if (c->level(which) == 0) {
         const LevelFilesBrief* flevel = c->input_levels(which);
         for (size_t i = 0; i < flevel->num_files; i++) {
@@ -5819,6 +5827,7 @@ InternalIterator* VersionSet::MakeInputIterator(
               /*allow_unprepared_value=*/false);
         }
       } else {
+        // 对于非level-0的层，直接将该层构造一整体的迭代器
         // Create concatenating iterator for the files from this level
         list[num++] = new LevelIterator(
             cfd->table_cache(), read_options, file_options_compactions,
@@ -5833,6 +5842,7 @@ InternalIterator* VersionSet::MakeInputIterator(
     }
   }
   assert(num <= space);
+  // 最后将获取到的迭代器数组交给 NewMergingIterator，进行排序结构的维护。
   InternalIterator* result =
       NewMergingIterator(&c->column_family_data()->internal_comparator(), list,
                          static_cast<int>(num));

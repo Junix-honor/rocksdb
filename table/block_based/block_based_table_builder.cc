@@ -916,7 +916,8 @@ void BlockBasedTableBuilder::Add(const Slice& key, const Slice& value) {
       assert(r->internal_comparator.Compare(key, Slice(r->last_key)) > 0);
     }
 #endif  // !NDEBUG
-
+    // 如果data block能够满足flush的条件，则直接flush
+    // datablock的数据到当前bulider对应的datablock存储结构中。
     auto should_flush = r->flush_block_policy->Update(key, value);
     if (should_flush) {
       assert(!r->data_block.empty());
@@ -940,6 +941,8 @@ void BlockBasedTableBuilder::Add(const Slice& key, const Slice& value) {
         }
 
         if (exceeds_buffer_limit || exceeds_global_block_cache_limit) {
+          // EnterUnbuffered 函数主要逻辑是构造compression
+          // block，如果我们开启了compression的选项则会构造。
           EnterUnbuffered();
         }
       }
@@ -1947,8 +1950,10 @@ Status BlockBasedTableBuilder::Finish() {
   assert(r->state != Rep::State::kClosed);
   bool empty_data_block = r->data_block.empty();
   r->first_key_in_next_block = nullptr;
+  // 再次执行 先尝试将key-value的数据刷到datablock
   Flush();
   if (r->state == Rep::State::kBuffered) {
+    // 依据datablock数据构建index ,filter和compression block数据
     EnterUnbuffered();
   }
   if (r->IsParallelCompressionEnabled()) {
@@ -1977,19 +1982,27 @@ Status BlockBasedTableBuilder::Finish() {
   //    7. Footer
   BlockHandle metaindex_block_handle, index_block_handle;
   MetaIndexBuilder meta_index_builder;
+  // filter_builder数据添加到 meta_index_builder
   WriteFilterBlock(&meta_index_builder);
+  // 添加index_builder
   WriteIndexBlock(&meta_index_builder, &index_block_handle);
+  // 添加compression block
   WriteCompressionDictBlock(&meta_index_builder);
+  // 添加range tombstone
   WriteRangeDelBlock(&meta_index_builder);
+  // 添加最终的属性数据
   WritePropertiesBlock(&meta_index_builder);
   if (ok()) {
+    // 写meta index block数据
     // flush the meta index block
     WriteRawBlock(meta_index_builder.Finish(), kNoCompression,
                   &metaindex_block_handle, BlockType::kMetaIndex);
   }
   if (ok()) {
+    // 写Footer数据
     WriteFooter(metaindex_block_handle, index_block_handle);
   }
+  // 最终返回table_builder的close状态，析构当前的table builer
   r->state = Rep::State::kClosed;
   r->SetStatus(r->CopyIOStatus());
   Status ret_status = r->CopyStatus();

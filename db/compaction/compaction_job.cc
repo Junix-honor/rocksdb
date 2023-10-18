@@ -1291,6 +1291,8 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   read_options.iterate_lower_bound = start;
   read_options.iterate_upper_bound = end;
 
+  // 通过之前步骤中填充的sub_compact数据取出对应的key-value数据，构造一个InternalIterator。
+  // 会构造一个堆排序的存储结构，来通过迭代器访问堆顶元素
   // Although the v2 aggregator is what the level iterator(s) know about,
   // the AddTombstones calls will be propagated down to the v1 aggregator.
   std::unique_ptr<InternalIterator> raw_input(
@@ -1430,6 +1432,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
       RecordCompactionIOStats();
     }
 
+    //! 将builder与输出文件的writer绑定
     // Open output file if necessary
     if (sub_compact->builder == nullptr) {
       status = OpenCompactionOutputFile(sub_compact);
@@ -1437,6 +1440,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
         break;
       }
     }
+    //! 通过table_builder的状态机添加block数据
     status = sub_compact->AddToBuilder(key, value);
     if (!status.ok()) {
       break;
@@ -1503,6 +1507,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
         next_key = &c_iter->key();
       }
       CompactionIterationStats range_del_out_stats;
+      //! 通过构建的meta_index_builder和Footer完成数据的固化
       status = FinishCompactionOutputFile(input->status(), sub_compact,
                                           &range_del_agg, &range_del_out_stats,
                                           next_key);
@@ -1858,6 +1863,7 @@ Status CompactionJob::FinishCompactionOutputFile(
     }
   }
   const uint64_t current_entries = sub_compact->builder->NumEntries();
+  //! 最终调用s = sub_compact->builder->Finish();完成所有数据的固化写入
   if (s.ok()) {
     s = sub_compact->builder->Finish();
   } else {
@@ -2106,7 +2112,7 @@ Status CompactionJob::OpenCompactionOutputFile(
       cfd->ioptions()->listeners, dbname_, cfd->GetName(), fname, job_id_,
       TableFileCreationReason::kCompaction);
 #endif  // !ROCKSDB_LITE
-  // Make the output file
+  //! Make the output file
   std::unique_ptr<FSWritableFile> writable_file;
 #ifndef NDEBUG
   bool syncpoint_arg = file_options_.use_direct_writes;
@@ -2173,7 +2179,7 @@ Status CompactionJob::OpenCompactionOutputFile(
     oldest_ancester_time = current_time;
   }
 
-  // Initialize a SubcompactionState::Output and add it to sub_compact->outputs
+  //! Initialize a SubcompactionState::Output and add it to sub_compact->outputs
   {
     FileMetaData meta;
     meta.fd = FileDescriptor(file_number,
@@ -2202,6 +2208,7 @@ Status CompactionJob::OpenCompactionOutputFile(
       db_options_.file_checksum_gen_factory.get(),
       tmp_set.Contains(FileType::kTableFile), false));
 
+  //! NewTableBuilder
   TableBuilderOptions tboptions(
       *cfd->ioptions(), *(sub_compact->compaction->mutable_cf_options()),
       cfd->internal_comparator(), cfd->int_tbl_prop_collector_factories(),
